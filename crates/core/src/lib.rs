@@ -17,13 +17,16 @@ use seednet_tun::subnet_mask;
 use seednet_tun::{AsyncTunDevice, TunConfig, platform};
 
 use tokio::net::UdpSocket;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_DATAGRAM: usize = OVERLAY_MTU + 256;
+
+const NOISE_HANDSHAKE_INITIATOR_PREFIX: &[u8] = b"seednet-hs-a";
+const NOISE_HANDSHAKE_RESPONDER_PREFIX: &[u8] = b"seednet-hs-b";
 
 pub struct SeedNetConfig {
     pub seed: Seed,
@@ -114,60 +117,6 @@ impl SeedNetEngine {
         &self.config.state_dir
     }
 
-    async fn initiator_handshake(
-        network_secret: &NetworkSecret,
-        device_keys: &DeviceKeys,
-        peer_addr: SocketAddr,
-        our_peer_id: PeerId,
-    ) -> std::result::Result<(PeerId, seednet_crypto::SecureTransport), Error> {
-        let ephemeral = UdpSocket::bind("0.0.0.0:0").await.map_err(Error::Io)?;
-
-        let mut initiator = InitiatorHandshake::new(network_secret, device_keys)
-            .map_err(|e| Error::NoiseHandshake(format!("init: {e}")))?;
-        let msg_a = initiator
-            .write_message_a(&[])
-            .map_err(|e| Error::NoiseHandshake(format!("write_message_a: {e}")))?;
-
-        ephemeral
-            .send_to(&msg_a, peer_addr)
-            .await
-            .map_err(Error::Io)?;
-
-        let mut buf = vec![0u8; MAX_DATAGRAM];
-        let (n, from) = tokio::time::timeout(HANDSHAKE_TIMEOUT, ephemeral.recv_from(&mut buf))
-            .await
-            .map_err(|_| Error::NoiseHandshake("timeout waiting for msg B".into()))?
-            .map_err(Error::Io)?;
-
-        if from != peer_addr {
-            return Err(Error::NoiseHandshake(
-                "msg B from unexpected address".into(),
-            ));
-        }
-
-        initiator
-            .read_message_b(&buf[..n])
-            .map_err(|e| Error::NoiseHandshake(format!("read_message_b: {e}")))?;
-
-        let init_result = initiator
-            .finish(&[])
-            .map_err(|e| Error::NoiseHandshake(format!("finish: {e}")))?;
-
-        ephemeral
-            .send_to(&init_result.msg_bytes, peer_addr)
-            .await
-            .map_err(Error::Io)?;
-
-        let remote_static = *init_result.transport.remote_static_key();
-        let peer_id = PeerId::from_bytes(remote_static);
-
-        if peer_id == our_peer_id {
-            return Err(Error::NoiseHandshake("discovered ourselves".into()));
-        }
-
-        Ok((peer_id, init_result.transport))
-    }
-
     pub async fn run(&self) -> std::result::Result<(), Error> {
         let port = self.config.port;
 
@@ -188,7 +137,7 @@ impl SeedNetEngine {
         let tun_device = AsyncTunDevice::create(&tun_config)?;
         let tun_name = tun_device.name().to_string();
         let (tun_reader, tun_writer, _) = tun_device.into_split();
-        let tun_writer = Arc::new(tokio::sync::Mutex::new(tun_writer));
+        let tun_writer = Arc::new(Mutex::new(tun_writer));
 
         if let Err(e) = platform::configure_interface(
             &tun_name,
@@ -210,6 +159,8 @@ impl SeedNetEngine {
         let peer_underlays: Arc<RwLock<HashMap<PeerId, SocketAddr>>> =
             Arc::new(RwLock::new(HashMap::new()));
         let addr_to_peer: Arc<RwLock<HashMap<SocketAddr, PeerId>>> =
+            Arc::new(RwLock::new(HashMap::new()));
+        let pending_handshakes: Arc<RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
         let dht = DhtDiscovery::start_with(0, std::net::Ipv4Addr::UNSPECIFIED, &[])
@@ -294,6 +245,7 @@ impl SeedNetEngine {
         let transports_in = transports.clone();
         let addr_to_peer_in = addr_to_peer.clone();
         let peer_underlays_in = peer_underlays.clone();
+        let pending_in = pending_handshakes.clone();
         let network_secret_resp = self.network_secret;
         let device_keys_resp = self.device_keys.clone();
         let routing_table_in = self.routing_table.clone();
@@ -309,6 +261,17 @@ impl SeedNetEngine {
                         if data == b"seednet-heartbeat" {
                             tracing::trace!(target: "seednet", from = %from, "heartbeat received");
                             continue;
+                        }
+
+                        if data.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
+                            let mut pending = pending_in.write().await;
+                            if let Some(sender) = pending.remove(&from) {
+                                drop(pending);
+                                tracing::debug!(target: "seednet", from = %from, "dispatching msg B to pending initiator");
+                                let _ = sender.send(data.to_vec());
+                                continue;
+                            }
+                            drop(pending);
                         }
 
                         let a2p = addr_to_peer_in.read().await;
@@ -328,84 +291,116 @@ impl SeedNetEngine {
                         }
                         drop(a2p);
 
-                        if let Ok(mut responder) =
-                            ResponderHandshake::new(&network_secret_resp, &device_keys_resp)
-                            && responder.read_message_a(data).is_ok()
-                            && let Ok(msg_b) = responder.write_message_b(&[])
-                        {
-                            tracing::info!(target: "seednet", from = %from, "received handshake msg A, sending msg B");
+                        if data.starts_with(NOISE_HANDSHAKE_INITIATOR_PREFIX) {
+                            let noise_payload = &data[NOISE_HANDSHAKE_INITIATOR_PREFIX.len()..];
 
-                            let _ = udp_in.send_to(&msg_b, from).await;
-
-                            let mut cbuf = vec![0u8; MAX_DATAGRAM];
-                            match tokio::time::timeout(
-                                HANDSHAKE_TIMEOUT,
-                                udp_in.recv_from(&mut cbuf),
-                            )
-                            .await
+                            if let Ok(mut responder) =
+                                ResponderHandshake::new(&network_secret_resp, &device_keys_resp)
+                                && responder.read_message_a(noise_payload).is_ok()
+                                && let Ok(msg_b) = responder.write_message_b(&[])
                             {
-                                Ok(Ok((cn, cfrom))) if cfrom == from => {
-                                    let cdata = &cbuf[..cn];
-                                    if cdata == b"seednet-heartbeat" {
-                                        continue;
+                                let mut tagged = NOISE_HANDSHAKE_RESPONDER_PREFIX.to_vec();
+                                tagged.extend_from_slice(&msg_b);
+
+                                tracing::info!(target: "seednet", from = %from, "received handshake msg A, sending msg B");
+                                let _ = udp_in.send_to(&tagged, from).await;
+
+                                let mut cbuf = vec![0u8; MAX_DATAGRAM];
+                                match tokio::time::timeout(
+                                    HANDSHAKE_TIMEOUT,
+                                    udp_in.recv_from(&mut cbuf),
+                                )
+                                .await
+                                {
+                                    Ok(Ok((cn, cfrom))) if cfrom == from => {
+                                        let cdata = &cbuf[..cn];
+
+                                        if cdata == b"seednet-heartbeat"
+                                            || cdata.starts_with(NOISE_HANDSHAKE_INITIATOR_PREFIX)
+                                            || cdata.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX)
+                                        {
+                                            tracing::warn!(target: "seednet", from = %from, "unexpected handshake/heartbeat during msg C wait");
+                                            continue;
+                                        }
+
+                                        if let Ok(resp_result) = responder.finish(cdata) {
+                                            let remote_static =
+                                                *resp_result.transport.remote_static_key();
+                                            let peer_id = PeerId::from_bytes(remote_static);
+
+                                            tracing::info!(
+                                                target: "seednet",
+                                                peer = %peer_id.short(),
+                                                addr = %from,
+                                                "handshake completed (responder)"
+                                            );
+
+                                            let mut ts = transports_in.write().await;
+                                            ts.insert(peer_id, resp_result.transport);
+                                            drop(ts);
+
+                                            let mut a2p = addr_to_peer_in.write().await;
+                                            a2p.insert(from, peer_id);
+                                            drop(a2p);
+
+                                            let mut pu_w = peer_underlays_in.write().await;
+                                            pu_w.insert(peer_id, from);
+                                            drop(pu_w);
+
+                                            let overlay = derive_overlay_addr(&peer_id);
+                                            let mut rt = routing_table_in.write().await;
+                                            rt.add_route(overlay, peer_id);
+                                            drop(rt);
+
+                                            let _peer =
+                                                peer_mgr_in.discover(peer_id, from).await;
+                                            let _ = peer_mgr_in
+                                                .transition_peer(
+                                                    &peer_id,
+                                                    PeerState::Connecting,
+                                                )
+                                                .await;
+                                            let _ = peer_mgr_in
+                                                .transition_peer(
+                                                    &peer_id,
+                                                    PeerState::Handshaking,
+                                                )
+                                                .await;
+                                            let _ = peer_mgr_in
+                                                .transition_peer(
+                                                    &peer_id,
+                                                    PeerState::Connected,
+                                                )
+                                                .await;
+
+                                            tracing::info!(
+                                                target: "seednet",
+                                                peer = %peer_id.short(),
+                                                overlay = %overlay,
+                                                addr = %from,
+                                                "peer route registered (responder)"
+                                            );
+                                        }
                                     }
-                                    if let Ok(resp_result) = responder.finish(cdata) {
-                                        let remote_static =
-                                            *resp_result.transport.remote_static_key();
-                                        let peer_id = PeerId::from_bytes(remote_static);
-
-                                        tracing::info!(
+                                    Ok(Ok((cn, cfrom))) => {
+                                        tracing::warn!(
                                             target: "seednet",
-                                            peer = %peer_id.short(),
-                                            addr = %from,
-                                            "handshake completed (responder)"
+                                            expected = %from,
+                                            got = %cfrom,
+                                            "msg C from unexpected address"
                                         );
-
-                                        let mut ts = transports_in.write().await;
-                                        ts.insert(peer_id, resp_result.transport);
-                                        drop(ts);
-
-                                        let mut a2p = addr_to_peer_in.write().await;
-                                        a2p.insert(from, peer_id);
-                                        drop(a2p);
-
-                                        let mut pu_w = peer_underlays_in.write().await;
-                                        pu_w.insert(peer_id, from);
-                                        drop(pu_w);
-
-                                        let overlay = derive_overlay_addr(&peer_id);
-                                        let mut rt = routing_table_in.write().await;
-                                        rt.add_route(overlay, peer_id);
-                                        drop(rt);
-
-                                        let _peer = peer_mgr_in.discover(peer_id, from).await;
-                                        let _ = peer_mgr_in
-                                            .transition_peer(&peer_id, PeerState::Connecting)
-                                            .await;
-                                        let _ = peer_mgr_in
-                                            .transition_peer(&peer_id, PeerState::Handshaking)
-                                            .await;
-                                        let _ = peer_mgr_in
-                                            .transition_peer(&peer_id, PeerState::Connected)
-                                            .await;
-
-                                        tracing::info!(
-                                            target: "seednet",
-                                            peer = %peer_id.short(),
-                                            overlay = %overlay,
-                                            addr = %from,
-                                            "peer route registered (responder)"
-                                        );
+                                        let mut pending = pending_in.write().await;
+                                        if let Some(sender) = pending.remove(&cfrom) {
+                                            drop(pending);
+                                            let _ = sender.send(cbuf[..cn].to_vec());
+                                        }
                                     }
-                                }
-                                Ok(Ok((_, other_from))) => {
-                                    tracing::debug!(target: "seednet", from = %other_from, "handshake msg C from unexpected addr, re-queuing");
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::debug!(target: "seednet", error = %e, "recv error during handshake");
-                                }
-                                Err(_) => {
-                                    tracing::debug!(target: "seednet", "handshake msg C timed out");
+                                    Ok(Err(e)) => {
+                                        tracing::debug!(target: "seednet", error = %e, "recv error during handshake");
+                                    }
+                                    Err(_) => {
+                                        tracing::debug!(target: "seednet", from = %from, "handshake msg C timed out");
+                                    }
                                 }
                             }
                         }
@@ -420,9 +415,11 @@ impl SeedNetEngine {
         let peer_mgr_dht = self.peer_manager.clone();
         let network_secret_dht = self.network_secret;
         let device_keys_dht = self.device_keys.clone();
+        let udp_dht = udp.clone();
         let transports_dht = transports.clone();
         let addr_to_peer_dht = addr_to_peer.clone();
         let peer_underlays_dht = peer_underlays.clone();
+        let pending_dht = pending_handshakes.clone();
         let routing_table_dht = self.routing_table.clone();
         let our_peer_id_dht = self.our_peer_id;
         let infohash = self.infohash;
@@ -442,21 +439,84 @@ impl SeedNetEngine {
                             drop(a2p);
 
                             if already_known {
-                                tracing::debug!(target: "seednet", addr = %addr, "peer already connected, skipping handshake");
+                                tracing::debug!(target: "seednet", addr = %addr, "peer already connected, skipping");
                                 continue;
                             }
 
                             tracing::info!(target: "seednet", addr = %addr, "initiating handshake to discovered peer");
 
-                            match Self::initiator_handshake(
+                            let mut initiator = match InitiatorHandshake::new(
                                 &network_secret_dht,
                                 &device_keys_dht,
-                                addr,
-                                our_peer_id_dht,
-                            )
-                            .await
+                            ) {
+                                Ok(i) => i,
+                                Err(e) => {
+                                    tracing::warn!(target: "seednet", error = %e, "initiator create failed");
+                                    continue;
+                                }
+                            };
+
+                            let msg_a = match initiator.write_message_a(&[]) {
+                                Ok(m) => m,
+                                Err(e) => {
+                                    tracing::warn!(target: "seednet", error = %e, "write_message_a failed");
+                                    continue;
+                                }
+                            };
+
+                            let mut tagged_a = NOISE_HANDSHAKE_INITIATOR_PREFIX.to_vec();
+                            tagged_a.extend_from_slice(&msg_a);
+
+                            let (tx, rx) = tokio::sync::oneshot::channel();
                             {
-                                Ok((peer_id, transport)) => {
+                                let mut pending = pending_dht.write().await;
+                                pending.insert(addr, tx);
+                            }
+
+                            if let Err(e) = udp_dht.send_to(&tagged_a, addr).await {
+                                let mut pending = pending_dht.write().await;
+                                pending.remove(&addr);
+                                tracing::warn!(target: "seednet", error = %e, "send msg A failed");
+                                continue;
+                            }
+
+                            tracing::debug!(target: "seednet", addr = %addr, "msg A sent, waiting for msg B");
+
+                            match tokio::time::timeout(HANDSHAKE_TIMEOUT, rx).await {
+                                Ok(Ok(msg_b_tagged)) => {
+                                    if !msg_b_tagged.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
+                                        tracing::warn!(target: "seednet", "msg B has wrong prefix");
+                                        continue;
+                                    }
+                                    let msg_b = &msg_b_tagged[NOISE_HANDSHAKE_RESPONDER_PREFIX.len()..];
+
+                                    if let Err(e) = initiator.read_message_b(msg_b) {
+                                        tracing::warn!(target: "seednet", error = %e, "read_message_b failed");
+                                        continue;
+                                    }
+
+                                    let init_result = match initiator.finish(&[]) {
+                                        Ok(r) => r,
+                                        Err(e) => {
+                                            tracing::warn!(target: "seednet", error = %e, "initiator finish failed");
+                                            continue;
+                                        }
+                                    };
+
+                                    if let Err(e) = udp_dht.send_to(&init_result.msg_bytes, addr).await {
+                                        tracing::warn!(target: "seednet", error = %e, "send msg C failed");
+                                        continue;
+                                    }
+
+                                    let remote_static =
+                                        *init_result.transport.remote_static_key();
+                                    let peer_id = PeerId::from_bytes(remote_static);
+
+                                    if peer_id == our_peer_id_dht {
+                                        tracing::debug!(target: "seednet", "discovered ourselves, ignoring");
+                                        continue;
+                                    }
+
                                     tracing::info!(
                                         target: "seednet",
                                         peer = %peer_id.short(),
@@ -465,7 +525,7 @@ impl SeedNetEngine {
                                     );
 
                                     let mut ts = transports_dht.write().await;
-                                    ts.insert(peer_id, transport);
+                                    ts.insert(peer_id, init_result.transport);
                                     drop(ts);
 
                                     let mut a2p = addr_to_peer_dht.write().await;
@@ -500,12 +560,16 @@ impl SeedNetEngine {
                                         "peer route registered (initiator)"
                                     );
                                 }
-                                Err(e) => {
+                                Ok(Err(_)) => {
+                                    tracing::warn!(target: "seednet", addr = %addr, "msg B channel dropped");
+                                }
+                                Err(_) => {
+                                    let mut pending = pending_dht.write().await;
+                                    pending.remove(&addr);
                                     tracing::warn!(
                                         target: "seednet",
                                         addr = %addr,
-                                        error = %e,
-                                        "initiator handshake failed"
+                                        "initiator handshake timed out waiting for msg B"
                                     );
                                 }
                             }
@@ -564,13 +628,13 @@ impl SeedNetEngine {
 
 pub fn print_status(engine: &SeedNetEngine) {
     println!("SeedNet status");
-    println!("────────────────────────────────────────────────────");
+    println!("──────────────────────────────────────────────────");
     println!("  Infohash    : {}", engine.infohash());
     println!("  PeerId      : {}", engine.our_peer_id());
     println!("  Overlay IP  : {}", engine.our_overlay());
     println!("  Port        : {}", engine.port());
     println!("  State dir   : {}", engine.state_dir().path().display());
-    println!("────────────────────────────────────────────────────");
+    println!("──────────────────────────────────────────────────");
 }
 
 #[cfg(test)]
