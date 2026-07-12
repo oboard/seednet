@@ -6,6 +6,7 @@ members = [
     "crates/config",
     "crates/dht",
     "crates/peer",
+    "crates/tun",
     "crates/cli",
 ]
 
@@ -24,6 +25,7 @@ seednet-crypto = { path = "crates/crypto" }
 seednet-config = { path = "crates/config" }
 seednet-dht = { path = "crates/dht" }
 seednet-peer = { path = "crates/peer" }
+seednet-tun = { path = "crates/tun" }
 
 # Core async runtime
 tokio = { version = "1.52", features = ["full"] }
@@ -47,6 +49,7 @@ rand = "0.8"
 socket2 = "0.6"
 dashmap = "6.1"
 mainline = { version = "7.0", default-features = false, features = ["async"] }
+tun = { version = "0.8", features = ["async", "tokio"] }
 futures-lite = "2"
 futures = "0.3"
 
