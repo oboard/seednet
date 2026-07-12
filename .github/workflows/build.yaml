@@ -48,12 +48,6 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             name: seednet-aarch64-macos
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            name: seednet-x86_64-windows.exe
-          - target: aarch64-pc-windows-msvc
-            os: windows-latest
-            name: seednet-aarch64-windows.exe
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -93,10 +87,6 @@ jobs:
         shell: bash
         run: |
           BIN="target/${{ matrix.target }}/release/seednet"
-          EXT="${{ matrix.target }}"
-          if [[ "$EXT" == *"-windows-"* ]]; then
-            BIN="${BIN}.exe"
-          fi
           cp "$BIN" "${{ matrix.name }}"
 
       - uses: actions/upload-artifact@v4
