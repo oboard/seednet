@@ -185,7 +185,7 @@ mod tests {
         let announcer = DhtDiscovery::start_with(
             0,
             std::net::Ipv4Addr::LOCALHOST,
-            &[bootstrap_addr.clone()],
+            std::slice::from_ref(&bootstrap_addr),
         )
         .expect("announcer start");
         announcer.bootstrapped().await;

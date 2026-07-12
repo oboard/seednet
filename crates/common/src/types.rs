@@ -48,7 +48,7 @@ impl FromStr for Seed {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        if s.as_bytes().len() < Self::MIN_LEN {
+        if s.len() < Self::MIN_LEN {
             return Err(Error::EmptySeed);
         }
         Ok(Self::from_passphrase(s))
@@ -322,7 +322,7 @@ fn hex_short(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return Err(Error::InvalidHexLength(s.len()));
     }
     let mut out = Vec::with_capacity(s.len() / 2);

@@ -1,10 +1,3 @@
-//! TUN packet routing for the SeedNet overlay.
-//!
-//! Parses IPv4 packet headers from the TUN interface, looks up the
-//! destination overlay IP in the routing table, and forwards packets
-//! to the appropriate peer (encrypted). Inbound encrypted packets are
-//! decrypted and written back to the TUN interface.
-
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
@@ -105,13 +98,13 @@ impl RoutingTable {
 
 pub struct Router {
     table: RoutingTable,
-    transport: SecureTransport,
+    transports: HashMap<PeerId, SecureTransport>,
     our_overlay: OverlayAddr,
 }
 
 impl Router {
-    pub fn new(table: RoutingTable, transport: SecureTransport, our_overlay: OverlayAddr) -> Self {
-        Self { table, transport, our_overlay }
+    pub fn new(table: RoutingTable, our_overlay: OverlayAddr) -> Self {
+        Self { table, transports: HashMap::new(), our_overlay }
     }
 
     pub fn table(&self) -> &RoutingTable {
@@ -120,6 +113,18 @@ impl Router {
 
     pub fn table_mut(&mut self) -> &mut RoutingTable {
         &mut self.table
+    }
+
+    pub fn add_transport(&mut self, peer_id: PeerId, transport: SecureTransport) {
+        self.transports.insert(peer_id, transport);
+    }
+
+    pub fn remove_transport(&mut self, peer_id: &PeerId) {
+        self.transports.remove(peer_id);
+    }
+
+    pub fn has_transport(&self, peer_id: &PeerId) -> bool {
+        self.transports.contains_key(peer_id)
     }
 
     pub fn route_outbound(&mut self, packet: &[u8]) -> std::result::Result<Option<(PeerId, Vec<u8>)>, Error> {
@@ -134,12 +139,18 @@ impl Router {
             Some(id) => *id,
             None => return Ok(None),
         };
-        let encrypted = self.transport.encrypt(packet)?;
+        let transport = match self.transports.get_mut(&peer_id) {
+            Some(t) => t,
+            None => return Ok(None),
+        };
+        let encrypted = transport.encrypt(packet)?;
         Ok(Some((peer_id, encrypted)))
     }
 
-    pub fn route_inbound(&mut self, encrypted: &[u8]) -> std::result::Result<Vec<u8>, Error> {
-        let decrypted = self.transport.decrypt(encrypted)?;
+    pub fn route_inbound(&mut self, peer_id: &PeerId, encrypted: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        let transport = self.transports.get_mut(peer_id)
+            .ok_or_else(|| Error::NoiseTransport(format!("no transport for peer {}", peer_id.short())))?;
+        let decrypted = transport.decrypt(encrypted)?;
         let _parsed = parse_ipv4_packet(&decrypted)?;
         Ok(decrypted)
     }
@@ -241,7 +252,8 @@ mod tests {
         table.add_route(dst, id);
 
         let (t_a, _) = make_transport_pair();
-        let mut router = Router::new(table, t_a, our);
+        let mut router = Router::new(table, our);
+        router.add_transport(id, t_a);
 
         let pkt = make_ipv4_packet(our.ip(), dst.ip(), 20);
         let result = router.route_outbound(&pkt).unwrap();
@@ -252,11 +264,28 @@ mod tests {
     }
 
     #[test]
+    fn router_outbound_no_transport_returns_none() {
+        let mut table = RoutingTable::new();
+        let id = test_peer_id(1);
+        let dst = OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 2));
+        let our = OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1));
+        table.add_route(dst, id);
+
+        let router = Router::new(table, our);
+        assert!(!router.has_transport(&id));
+
+        let mut router = router;
+        let pkt = make_ipv4_packet(our.ip(), dst.ip(), 20);
+        assert!(router.route_outbound(&pkt).unwrap().is_none());
+    }
+
+    #[test]
     fn router_outbound_non_overlay_returns_none() {
         let table = RoutingTable::new();
         let our = OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1));
         let (t_a, _) = make_transport_pair();
-        let mut router = Router::new(table, t_a, our);
+        let mut router = Router::new(table, our);
+        router.add_transport(test_peer_id(99), t_a);
 
         let pkt = make_ipv4_packet(Ipv4Addr::new(10, 88, 1, 1), Ipv4Addr::new(192, 168, 1, 1), 20);
         assert!(router.route_outbound(&pkt).unwrap().is_none());
@@ -271,7 +300,8 @@ mod tests {
         table.add_route(dst, id);
 
         let (t_a, mut t_b) = make_transport_pair();
-        let mut router = Router::new(table, t_a, our);
+        let mut router = Router::new(table, our);
+        router.add_transport(id, t_a);
 
         let pkt = make_ipv4_packet(our.ip(), dst.ip(), 20);
         let (_, encrypted) = router.route_outbound(&pkt).unwrap().unwrap();
@@ -281,14 +311,46 @@ mod tests {
     }
 
     #[test]
+    fn router_inbound_with_peer_id() {
+        let id_b = test_peer_id(2);
+        let mut table = RoutingTable::new();
+        let dst_b = OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 2));
+        let our = OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1));
+        table.add_route(dst_b, id_b);
+
+        let (t_a, t_b) = make_transport_pair();
+        let mut router_a = Router::new(table, our);
+        router_a.add_transport(id_b, t_a);
+
+        let pkt = make_ipv4_packet(our.ip(), dst_b.ip(), 20);
+        let (_, encrypted) = router_a.route_outbound(&pkt).unwrap().unwrap();
+
+        let mut router_b = Router::new(RoutingTable::new(), dst_b);
+        let id_a = test_peer_id(1);
+        router_b.add_transport(id_a, t_b);
+
+        let decrypted = router_b.route_inbound(&id_a, &encrypted).unwrap();
+        assert_eq!(decrypted, pkt);
+    }
+
+    #[test]
     fn router_outbound_self_dst_returns_none() {
         let mut table = RoutingTable::new();
         let our = OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1));
         table.add_route(our, test_peer_id(99));
         let (t_a, _) = make_transport_pair();
-        let mut router = Router::new(table, t_a, our);
+        let mut router = Router::new(table, our);
+        router.add_transport(test_peer_id(99), t_a);
 
         let pkt = make_ipv4_packet(our.ip(), our.ip(), 20);
         assert!(router.route_outbound(&pkt).unwrap().is_none());
+    }
+
+    #[test]
+    fn router_inbound_unknown_peer_fails() {
+        let mut router = Router::new(RoutingTable::new(), OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1)));
+        let unknown = test_peer_id(99);
+        let result = router.route_inbound(&unknown, &[0u8; 64]);
+        assert!(result.is_err());
     }
 }

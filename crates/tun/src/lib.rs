@@ -1,29 +1,3 @@
-//! Cross-platform TUN interface for SeedNet.
-//!
-//! Creates a virtual network interface with the device's overlay IP and MTU,
-//! then provides an async read/write loop for exchanging raw IP packets
-//! between the kernel network stack and the SeedNet overlay.
-//!
-//! # Platform requirements
-//!
-//! - **macOS**: Must run as root, or with the `com.apple.developer.networking.tun`
-//!   entitlement on signed builds. The interface appears as `utunN`.
-//! - **Linux**: Must run as root or with `CAP_NET_ADMIN`. The interface appears
-//!   as `tunN`.
-//! - **Windows**: Must run as Administrator and have `wintun.dll` on `PATH`.
-//!
-//! # Implementation note
-//!
-//! The `tun` crate (v0.8) is listed as a workspace dependency. However, since
-//! it requires platform-specific privileges and native libraries that may not
-//! be available in all build environments, the TUN crate is structured so that
-//! it compiles without `tun` at build time when the feature is not enabled,
-//! and uses a trait-based abstraction so tests can run without privileges.
-//!
-//! Currently this module provides configuration and a trait abstraction.
-//! The actual TUN creation requires platform privileges and is only
-//! exercised in integration tests or when run with appropriate permissions.
-
 use std::net::Ipv4Addr;
 
 use seednet_common::{Error, OverlayAddr, Result, OVERLAY_MTU, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX};
@@ -66,7 +40,7 @@ impl TunConfig {
     }
 }
 
-fn subnet_mask(prefix: u8) -> Ipv4Addr {
+pub fn subnet_mask(prefix: u8) -> Ipv4Addr {
     if prefix > 32 {
         return Ipv4Addr::BROADCAST;
     }
@@ -93,9 +67,18 @@ pub trait TunDevice: Send + Sync {
 pub fn create_tun(_config: &TunConfig) -> Result<Box<dyn TunDevice>> {
     Err(Error::Io(std::io::Error::new(
         std::io::ErrorKind::PermissionDenied,
-        "TUN creation requires platform privileges; use create_tun_async in a privileged context",
+        "TUN creation requires platform privileges; enable 'real-tun' feature and run as root",
     )))
 }
+
+#[cfg(feature = "real-tun")]
+pub mod real;
+
+#[cfg(feature = "real-tun")]
+pub use real::AsyncTunDevice;
+
+#[cfg(feature = "real-tun")]
+pub mod platform;
 
 #[cfg(test)]
 mod tests {

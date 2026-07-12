@@ -124,7 +124,7 @@ impl StateDir {
 
     /// Read the PID from the PID file, if present.
     pub fn read_pid(&self) -> Result<Option<u32>> {
-        match fs::read_to_string(&self.pid_path()) {
+        match fs::read_to_string(self.pid_path()) {
             Ok(s) => s
                 .trim()
                 .parse::<u32>()
@@ -137,7 +137,7 @@ impl StateDir {
 
     /// Remove the PID file (e.g. on shutdown).
     pub fn clear_pid(&self) -> Result<()> {
-        match fs::remove_file(&self.pid_path()) {
+        match fs::remove_file(self.pid_path()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),

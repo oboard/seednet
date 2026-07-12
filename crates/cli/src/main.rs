@@ -1,13 +1,13 @@
 //! `seednet` — command-line entry point.
 //!
 //! Milestone 1 implements:
-//!   * `seednet up <SEED>`        — bring the network up (stubbed for now; full
-//!                                   wiring arrives in later milestones).
-//!   * `seednet down`             — bring the network down.
-//!   * `seednet status`           — show running state.
-//!   * `seednet identity <SEED>`  — print the derived network identity
-//!                                   (infohash, this device's PeerId and overlay
-//!                                   address) without joining the network.
+//! * `seednet up <SEED>` — bring the network up (stubbed for now; full
+//!   wiring arrives in later milestones).
+//! * `seednet down` — bring the network down.
+//! * `seednet status` — show running state.
+//! * `seednet identity <SEED>` — print the derived network identity
+//!   (infohash, this device's PeerId and overlay address) without joining
+//!   the network.
 
 mod logging;
 mod commands;

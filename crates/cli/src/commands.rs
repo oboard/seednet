@@ -52,6 +52,9 @@ pub async fn up(state_dir: &StateDir, seed: &Seed, port: u16) -> Result<()> {
     println!("  peer id  : {}", engine.our_peer_id());
     println!("  port     : {port}");
     println!("  identity : {}", state_dir.identity_path().display());
+    println!();
+    println!("  Creating TUN interface and starting overlay …");
+    println!("  (requires root / CAP_NET_ADMIN)");
 
     state_dir.write_pid(std::process::id())?;
 

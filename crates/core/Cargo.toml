@@ -13,7 +13,7 @@ seednet-crypto = { workspace = true }
 seednet-config = { workspace = true }
 seednet-dht = { workspace = true }
 seednet-peer = { workspace = true }
-seednet-tun = { workspace = true }
+seednet-tun = { workspace = true, features = ["real-tun"] }
 seednet-overlay = { workspace = true }
 seednet-routing = { workspace = true }
 tokio = { workspace = true }
