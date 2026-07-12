@@ -240,7 +240,7 @@ mod tests {
         derive_network_secret(&Seed::from_passphrase("test"))
     }
 
-    fn test_keys() -> DeviceKeys {
+    fn _test_keys() -> DeviceKeys {
         DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x55u8; 32]))
     }
 

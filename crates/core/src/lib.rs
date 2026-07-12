@@ -145,7 +145,7 @@ impl SeedNetEngine {
 
         let peer_mgr = self.peer_manager.clone();
         let infohash = self.infohash;
-        let our_peer_id = self.our_peer_id;
+        let _our_peer_id = self.our_peer_id;
 
         let dht_clone = dht.clone();
         let discovery_handle = tokio::spawn(async move {

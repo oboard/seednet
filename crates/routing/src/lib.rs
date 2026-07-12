@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use seednet_common::{Error, OverlayAddr, PeerId, OVERLAY_MTU, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX};
+use seednet_common::{Error, OverlayAddr, PeerId, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX};
 use seednet_crypto::SecureTransport;
 
 const IPV4_HEADER_MIN_LEN: usize = 20;

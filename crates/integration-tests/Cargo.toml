@@ -1,0 +1,22 @@
+[package]
+name = "seednet-integration-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Integration tests for SeedNet cross-crate interactions"
+publish = false
+
+[dev-dependencies]
+seednet-common = { workspace = true }
+seednet-crypto = { workspace = true }
+seednet-config = { workspace = true }
+seednet-dht = { workspace = true }
+seednet-peer = { workspace = true }
+seednet-tun = { workspace = true }
+seednet-overlay = { workspace = true }
+seednet-routing = { workspace = true }
+seednet-core = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }

@@ -10,6 +10,7 @@ members = [
     "crates/overlay",
     "crates/routing",
     "crates/core",
+    "crates/integration-tests",
     "crates/cli",
 ]
 
