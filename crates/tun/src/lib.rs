@@ -1,6 +1,8 @@
 use std::net::Ipv4Addr;
 
-use seednet_common::{Error, OverlayAddr, Result, OVERLAY_MTU, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX};
+use seednet_common::{
+    Error, OVERLAY_MTU, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX, OverlayAddr, Result,
+};
 
 #[derive(Clone, Debug)]
 pub struct TunConfig {

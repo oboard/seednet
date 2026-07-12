@@ -29,7 +29,7 @@ pub mod state;
 
 pub use channel::MessageChannel;
 pub use manager::{PeerEvent, PeerManager};
-pub use message::{Message, InboundMessage, OutboundMessage};
+pub use message::{InboundMessage, Message, OutboundMessage};
 pub use peer::Peer;
 pub use session::Session;
 pub use state::{PeerState, TransitionError};

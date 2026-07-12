@@ -6,7 +6,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use seednet_common::Seed;
 use seednet_config::StateDir;
 use seednet_core::{SeedNetConfig, SeedNetEngine, print_status};
-use seednet_crypto::{derive_network_secret, derive_infohash, derive_overlay_addr, DeviceKeys, DeviceSeedBytes};
+use seednet_crypto::{
+    DeviceKeys, DeviceSeedBytes, derive_infohash, derive_network_secret, derive_overlay_addr,
+};
 use seednet_overlay::AllocationTable;
 use seednet_routing::RoutingTable;
 
@@ -14,10 +16,7 @@ static COUNTER: AtomicU64 = AtomicU64::new(0);
 
 fn temp_state_dir() -> StateDir {
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!(
-        "seednet-integ-{}-{n}",
-        std::process::id(),
-    ));
+    let dir = std::env::temp_dir().join(format!("seednet-integ-{}-{n}", std::process::id(),));
     StateDir::new(&dir).expect("create temp state dir")
 }
 
@@ -34,7 +33,10 @@ fn deterministic_identity_from_seed() {
     let infohash = derive_infohash(&secret);
     assert_eq!(*engine.infohash(), infohash);
     assert_eq!(*engine.network_secret(), secret);
-    assert_eq!(engine.our_overlay(), derive_overlay_addr(&engine.our_peer_id()));
+    assert_eq!(
+        engine.our_overlay(),
+        derive_overlay_addr(&engine.our_peer_id())
+    );
 }
 
 /// Engine's overlay IP is always in the 10.88.0.0/16 subnet.
@@ -158,7 +160,10 @@ fn identity_persistence() {
     let engine2 = SeedNetEngine::new(config2).unwrap();
     let peer_id2 = engine2.our_peer_id();
 
-    assert_eq!(peer_id1, peer_id2, "same state dir must yield same identity");
+    assert_eq!(
+        peer_id1, peer_id2,
+        "same state dir must yield same identity"
+    );
 }
 
 /// print_status runs without panic.

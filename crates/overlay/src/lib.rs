@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use seednet_common::{OverlayAddr, PeerId, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX};
+use seednet_common::{OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX, OverlayAddr, PeerId};
 use seednet_crypto::derive_overlay_addr;
 
 #[derive(Clone, Debug)]
@@ -99,8 +99,12 @@ pub fn is_in_overlay_subnet(addr: OverlayAddr) -> bool {
 }
 
 fn subnet_mask_u32(prefix: u8) -> u32 {
-    if prefix == 0 { return 0; }
-    if prefix >= 32 { return !0u32; }
+    if prefix == 0 {
+        return 0;
+    }
+    if prefix >= 32 {
+        return !0u32;
+    }
     !0u32 << (32 - prefix)
 }
 
@@ -192,7 +196,11 @@ mod tests {
         for i in 1u8..=100 {
             let id = PeerId::from_bytes([i; 32]);
             let addr = table.allocate(id);
-            assert!(is_in_overlay_subnet(addr), "addr {} not in overlay subnet", addr);
+            assert!(
+                is_in_overlay_subnet(addr),
+                "addr {} not in overlay subnet",
+                addr
+            );
         }
     }
 }

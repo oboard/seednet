@@ -3,8 +3,8 @@
 
 use seednet_common::{OverlayAddr, PeerId, Seed};
 use seednet_crypto::{
-    complete_handshake_pair, derive_network_secret, DeviceKeys,
-    DeviceSeedBytes, InitiatorHandshake, ResponderHandshake,
+    DeviceKeys, DeviceSeedBytes, InitiatorHandshake, ResponderHandshake, complete_handshake_pair,
+    derive_network_secret,
 };
 use seednet_peer::frame;
 use seednet_peer::message::{self, Message};
@@ -18,8 +18,7 @@ fn two_devices_handshake_and_exchange_messages() {
     let keys_a = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0xAA; 32]));
     let keys_b = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0xBB; 32]));
 
-    let (mut t_a, mut t_b) =
-        complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+    let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     // A → B: encrypted application message
     let msg_a = b"hello from device A";
@@ -71,8 +70,14 @@ fn handshake_step_by_step() {
     let resp_result = responder.finish(&init_result.msg_bytes).unwrap();
 
     // Verify mutual authentication: each side knows the other's static key
-    assert_eq!(init_result.transport.remote_static_key(), &keys_r.x25519_public_key());
-    assert_eq!(resp_result.transport.remote_static_key(), &keys_i.x25519_public_key());
+    assert_eq!(
+        init_result.transport.remote_static_key(),
+        &keys_r.x25519_public_key()
+    );
+    assert_eq!(
+        resp_result.transport.remote_static_key(),
+        &keys_i.x25519_public_key()
+    );
 }
 
 /// Wrong network secret (prologue) should cause the handshake to fail.
@@ -84,7 +89,10 @@ fn wrong_network_secret_handshake_fails() {
     let keys_b = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x22; 32]));
 
     let result = complete_handshake_pair(&secret_a, &keys_a, &secret_b, &keys_b);
-    assert!(result.is_err(), "handshake with mismatched prologue must fail");
+    assert!(
+        result.is_err(),
+        "handshake with mismatched prologue must fail"
+    );
 }
 
 /// Encrypted message framed and sent over a simulated "wire" (just bytes)
@@ -96,8 +104,7 @@ fn full_stack_message_over_wire() {
     let keys_a = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0xAA; 32]));
     let keys_b = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0xBB; 32]));
 
-    let (mut t_a, mut t_b) =
-        complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+    let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     // Sender side: build Message → serialize → encrypt → frame
     let msg = Message::Data(b"overlay packet payload".to_vec());
@@ -123,8 +130,7 @@ fn all_message_types_over_wire() {
     let keys_a = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x10; 32]));
     let keys_b = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x20; 32]));
 
-    let (mut t_a, mut t_b) =
-        complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+    let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     let messages = vec![
         Message::Data(vec![1, 2, 3, 4, 5]),
@@ -156,8 +162,7 @@ fn tampered_ciphertext_detected() {
     let keys_a = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x10; 32]));
     let keys_b = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x20; 32]));
 
-    let (mut t_a, mut t_b) =
-        complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+    let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     let msg = Message::Data(b"sensitive data".to_vec());
     let serialized = message::serialize_message(&msg);
@@ -181,8 +186,7 @@ fn replay_attack_detected() {
     let keys_a = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x10; 32]));
     let keys_b = DeviceKeys::from_seed(DeviceSeedBytes::from_bytes([0x20; 32]));
 
-    let (mut t_a, mut t_b) =
-        complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+    let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     let encrypted = t_a.encrypt(b"first message").unwrap();
 
@@ -192,5 +196,8 @@ fn replay_attack_detected() {
 
     // Replay the same ciphertext — must fail (nonce already used)
     let replay_result = t_b.decrypt(&encrypted);
-    assert!(replay_result.is_err(), "replayed ciphertext must be rejected");
+    assert!(
+        replay_result.is_err(),
+        "replayed ciphertext must be rejected"
+    );
 }

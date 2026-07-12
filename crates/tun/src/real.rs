@@ -1,6 +1,6 @@
 use std::net::IpAddr;
 
-use seednet_common::{Error, Result, OVERLAY_MTU};
+use seednet_common::{Error, OVERLAY_MTU, Result};
 use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
 
 use crate::TunConfig;
@@ -57,20 +57,25 @@ impl AsyncTunDevice {
         let mut device = tun::create(&tun_config)
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN create: {e}"))))?;
 
-        let tun_name = device.tun_name()
+        let tun_name = device
+            .tun_name()
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN name: {e}"))))?;
 
-        device.set_address(IpAddr::V4(config.overlay_addr))
+        device
+            .set_address(IpAddr::V4(config.overlay_addr))
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN set_address: {e}"))))?;
-        device.set_netmask(IpAddr::V4(config.netmask))
+        device
+            .set_netmask(IpAddr::V4(config.netmask))
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN set_netmask: {e}"))))?;
-        device.enabled(true)
+        device
+            .enabled(true)
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN enabled: {e}"))))?;
 
         let async_dev = AsyncDevice::new(device)
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN async: {e}"))))?;
 
-        let (writer, reader) = async_dev.split()
+        let (writer, reader) = async_dev
+            .split()
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN split: {e}"))))?;
 
         tracing::info!(target: "seednet", name = %tun_name, ip = %config.overlay_addr, "TUN device created");

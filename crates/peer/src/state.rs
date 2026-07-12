@@ -154,7 +154,10 @@ mod tests {
         assert!(!PeerState::Disconnected.can_transition_to(PeerState::Connected));
         assert!(matches!(
             PeerState::Disconnected.transition(PeerState::Connected),
-            Err(TransitionError::InvalidTransition { from: PeerState::Disconnected, to: PeerState::Connected })
+            Err(TransitionError::InvalidTransition {
+                from: PeerState::Disconnected,
+                to: PeerState::Connected
+            })
         ));
     }
 
@@ -168,7 +171,10 @@ mod tests {
             PeerState::Connected,
             PeerState::Dead,
         ] {
-            assert!(!s.can_transition_to(s), "{s:?} should not transition to itself");
+            assert!(
+                !s.can_transition_to(s),
+                "{s:?} should not transition to itself"
+            );
         }
     }
 

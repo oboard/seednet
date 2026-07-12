@@ -11,7 +11,7 @@
 
 use ed25519_dalek::SigningKey;
 use rand::RngCore;
-use seednet_common::{PeerId, SecretKeyBytes, PUBLIC_KEY_LEN, SECRET_KEY_LEN};
+use seednet_common::{PUBLIC_KEY_LEN, PeerId, SECRET_KEY_LEN, SecretKeyBytes};
 use serde::{Deserialize, Serialize};
 
 use crate::Error;
@@ -151,7 +151,6 @@ impl DeviceKeysBytes {
         Ok(postcard::from_bytes(input)?)
     }
 }
-
 
 #[cfg(test)]
 mod tests {

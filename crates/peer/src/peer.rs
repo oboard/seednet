@@ -76,7 +76,10 @@ impl Peer {
         self.inner.write().await.underlay_addr = Some(addr);
     }
 
-    pub async fn transition(&self, next: PeerState) -> std::result::Result<PeerState, TransitionError> {
+    pub async fn transition(
+        &self,
+        next: PeerState,
+    ) -> std::result::Result<PeerState, TransitionError> {
         let mut inner = self.inner.write().await;
         let prev = inner.state.state;
         inner.state.transition(next)?;
@@ -154,7 +157,7 @@ mod tests {
     #[tokio::test]
     async fn underlay_addr_roundtrip() {
         let addr: SocketAddr = "1.2.3.4:4242".parse().unwrap();
-        let p =         Peer::new_with_underlay(test_peer_id(), addr);
+        let p = Peer::new_with_underlay(test_peer_id(), addr);
         assert_eq!(p.underlay_addr().await, Some(addr));
     }
 

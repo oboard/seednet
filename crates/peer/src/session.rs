@@ -88,6 +88,9 @@ mod tests {
     #[test]
     fn heartbeat_interval_default() {
         let s = Session::new();
-        assert_eq!(s.heartbeat_interval(), Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        assert_eq!(
+            s.heartbeat_interval(),
+            Duration::from_secs(HEARTBEAT_INTERVAL_SECS)
+        );
     }
 }

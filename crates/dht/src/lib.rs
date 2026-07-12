@@ -62,11 +62,7 @@ impl DhtDiscovery {
 
     /// Start a DHT node for tests/local networks using an explicit list of
     /// bootstrap `host:port` strings and binding to a specific address.
-    pub fn start_with(
-        port: u16,
-        bind: std::net::Ipv4Addr,
-        bootstrap: &[String],
-    ) -> Result<Self> {
+    pub fn start_with(port: u16, bind: std::net::Ipv4Addr, bootstrap: &[String]) -> Result<Self> {
         let mut builder = Dht::builder();
         builder.port(port).bind_address(bind);
         if !bootstrap.is_empty() {
@@ -125,11 +121,7 @@ impl DhtDiscovery {
 
     /// Run a discovery cycle: announce, then lookup. Convenience wrapper used
     /// by the CLI `discover` command and by the orchestration loop later.
-    pub async fn discover(
-        &self,
-        info_hash: &InfoHash,
-        listen_port: u16,
-    ) -> Result<Vec<PeerAddr>> {
+    pub async fn discover(&self, info_hash: &InfoHash, listen_port: u16) -> Result<Vec<PeerAddr>> {
         self.announce(info_hash, listen_port).await?;
         self.lookup(info_hash).await
     }
@@ -144,8 +136,8 @@ fn id_from_infohash(info_hash: &InfoHash) -> Result<Id> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seednet_crypto::{derive_infohash, derive_network_secret};
     use seednet_common::Seed;
+    use seednet_crypto::{derive_infohash, derive_network_secret};
 
     #[test]
     fn id_from_infohash_is_infallible_for_20_bytes() {
@@ -170,11 +162,7 @@ mod tests {
             .build()
             .expect("bootstrap bind")
             .as_async();
-        let bootstrap_addr = bootstrap_node
-            .info()
-            .await
-            .local_addr()
-            .to_string();
+        let bootstrap_addr = bootstrap_node.info().await.local_addr().to_string();
         // Give the bootstrap node a moment to be ready.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
@@ -195,12 +183,8 @@ mod tests {
             .expect("announce");
 
         // 3. Looker
-        let looker = DhtDiscovery::start_with(
-            0,
-            std::net::Ipv4Addr::LOCALHOST,
-            &[bootstrap_addr],
-        )
-        .expect("looker start");
+        let looker = DhtDiscovery::start_with(0, std::net::Ipv4Addr::LOCALHOST, &[bootstrap_addr])
+            .expect("looker start");
         looker.bootstrapped().await;
 
         // Allow DHT propagation.

@@ -9,8 +9,8 @@
 //!   (infohash, this device's PeerId and overlay address) without joining
 //!   the network.
 
-mod logging;
 mod commands;
+mod logging;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

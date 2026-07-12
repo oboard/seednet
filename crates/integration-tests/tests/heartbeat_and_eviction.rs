@@ -59,21 +59,30 @@ async fn connected_peer_goes_dead_on_eviction() {
     let _peer = mgr.discover(id, addr).await;
     let _ = rx.try_recv();
 
-    mgr.transition_peer(&id, PeerState::Connecting).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connecting)
+        .await
+        .unwrap();
     let _ = rx.try_recv();
-    mgr.transition_peer(&id, PeerState::Handshaking).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Handshaking)
+        .await
+        .unwrap();
     let _ = rx.try_recv();
-    mgr.transition_peer(&id, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connected)
+        .await
+        .unwrap();
     let _ = rx.try_recv();
 
     mgr.transition_peer(&id, PeerState::Dead).await.unwrap();
 
     let evt = rx.try_recv().unwrap();
-    assert_eq!(evt, PeerEvent::StateChanged {
-        id,
-        from: PeerState::Connected,
-        to: PeerState::Dead,
-    });
+    assert_eq!(
+        evt,
+        PeerEvent::StateChanged {
+            id,
+            from: PeerState::Connected,
+            to: PeerState::Dead,
+        }
+    );
 }
 
 #[tokio::test]
@@ -83,13 +92,23 @@ async fn dead_peer_can_reconnect() {
     let addr: SocketAddr = "10.0.0.2:4242".parse().unwrap();
 
     let _peer = mgr.discover(id, addr).await;
-    mgr.transition_peer(&id, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Connected)
+        .await
+        .unwrap();
     mgr.transition_peer(&id, PeerState::Dead).await.unwrap();
 
-    mgr.transition_peer(&id, PeerState::Disconnected).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Discovering).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Disconnected)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Discovering)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -99,9 +118,15 @@ async fn remove_evicted_peer_from_manager() {
     let addr: SocketAddr = "10.0.0.3:4242".parse().unwrap();
 
     let _peer = mgr.discover(id, addr).await;
-    mgr.transition_peer(&id, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Connected)
+        .await
+        .unwrap();
 
     assert!(mgr.contains(&id));
     assert_eq!(mgr.peer_count(), 1);
@@ -120,18 +145,32 @@ async fn evict_expired_peers_keeps_active_ones() {
     let addr_e: SocketAddr = "10.0.0.20:4242".parse().unwrap();
 
     let _active = mgr.discover(id_active, addr_a).await;
-    mgr.transition_peer(&id_active, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id_active, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id_active, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id_active, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_active, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_active, PeerState::Connected)
+        .await
+        .unwrap();
 
     let _expired = mgr.discover(id_expired, addr_e).await;
-    mgr.transition_peer(&id_expired, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id_expired, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id_expired, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id_expired, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_expired, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_expired, PeerState::Connected)
+        .await
+        .unwrap();
 
     assert_eq!(mgr.peer_count(), 2);
 
-    mgr.transition_peer(&id_expired, PeerState::Dead).await.unwrap();
+    mgr.transition_peer(&id_expired, PeerState::Dead)
+        .await
+        .unwrap();
     mgr.remove(&id_expired);
 
     assert_eq!(mgr.peer_count(), 1);
@@ -148,15 +187,29 @@ async fn connected_peers_excludes_dead_and_expired() {
     let addr_d: SocketAddr = "10.0.0.31:4242".parse().unwrap();
 
     let _alive = mgr.discover(id_alive, addr_a).await;
-    mgr.transition_peer(&id_alive, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id_alive, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id_alive, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id_alive, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_alive, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_alive, PeerState::Connected)
+        .await
+        .unwrap();
 
     let _dead = mgr.discover(id_dead, addr_d).await;
-    mgr.transition_peer(&id_dead, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id_dead, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id_dead, PeerState::Connected).await.unwrap();
-    mgr.transition_peer(&id_dead, PeerState::Dead).await.unwrap();
+    mgr.transition_peer(&id_dead, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_dead, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_dead, PeerState::Connected)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id_dead, PeerState::Dead)
+        .await
+        .unwrap();
 
     let connected = mgr.connected_peers().await;
     assert!(connected.contains(&id_alive));

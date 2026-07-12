@@ -15,8 +15,8 @@
 //!    │                    → Transport ←         │
 //! ```
 
-use seednet_common::{NetworkSecret, Error};
 use crate::device::DeviceKeys;
+use seednet_common::{Error, NetworkSecret};
 
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 pub const MAX_MESSAGE_LEN: usize = 65535;
@@ -285,8 +285,7 @@ mod tests {
         let keys_a = test_keys_a();
         let keys_b = test_keys_b();
 
-        let (t_a, t_b) =
-            complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+        let (t_a, t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
         assert_eq!(t_a.remote_static_key(), &keys_b.x25519_public_key());
         assert_eq!(t_b.remote_static_key(), &keys_a.x25519_public_key());
@@ -315,8 +314,7 @@ mod tests {
         let keys_a = test_keys_a();
         let keys_b = test_keys_b();
 
-        let (_, mut t_b) =
-            complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+        let (_, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
         let result = t_b.decrypt(&[0xff; 64]);
         assert!(result.is_err(), "decrypting garbage should fail");

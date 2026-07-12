@@ -379,7 +379,10 @@ mod tests {
 
     #[test]
     fn peer_id_rejects_wrong_length() {
-        assert!(matches!(PeerId::from_str("deadbeef"), Err(Error::InvalidPeerIdLen(4))));
+        assert!(matches!(
+            PeerId::from_str("deadbeef"),
+            Err(Error::InvalidPeerIdLen(4))
+        ));
     }
 
     #[test]

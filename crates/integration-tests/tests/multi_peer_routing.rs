@@ -2,10 +2,10 @@ use std::net::Ipv4Addr;
 
 use seednet_common::{OverlayAddr, PeerId, Seed};
 use seednet_crypto::{
-    complete_handshake_pair, derive_network_secret, derive_overlay_addr, DeviceKeys,
-    DeviceSeedBytes,
+    DeviceKeys, DeviceSeedBytes, complete_handshake_pair, derive_network_secret,
+    derive_overlay_addr,
 };
-use seednet_routing::{parse_ipv4_packet, RoutingTable, Router};
+use seednet_routing::{Router, RoutingTable, parse_ipv4_packet};
 
 fn make_ipv4_packet(src: Ipv4Addr, dst: Ipv4Addr, payload: &[u8]) -> Vec<u8> {
     const HDR: usize = 20;
@@ -106,9 +106,8 @@ fn five_peers_mesh_routing() {
             if i == j {
                 continue;
             }
-            let (t_ij, _) = complete_handshake_pair(
-                &secret, &peers[i].keys, &secret, &peers[j].keys,
-            ).unwrap();
+            let (t_ij, _) =
+                complete_handshake_pair(&secret, &peers[i].keys, &secret, &peers[j].keys).unwrap();
             transports.push((i, j, t_ij));
         }
         table.add_route(peers[i].overlay, peers[i].id);
@@ -207,7 +206,11 @@ fn router_with_many_transports_selects_correct_peer() {
     assert_eq!(router.table().len(), 20);
 
     let peer_7 = make_test_peer(7);
-    let pkt = make_ipv4_packet(Ipv4Addr::new(10, 88, 0, 1), peer_7.overlay.ip(), b"find peer 7");
+    let pkt = make_ipv4_packet(
+        Ipv4Addr::new(10, 88, 0, 1),
+        peer_7.overlay.ip(),
+        b"find peer 7",
+    );
     let (routed, encrypted) = router.route_outbound(&pkt).unwrap().unwrap();
     assert_eq!(routed, peer_7.id);
     assert!(!encrypted.is_empty());

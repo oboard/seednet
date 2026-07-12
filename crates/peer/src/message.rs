@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-use seednet_common::{PeerId, OverlayAddr};
+use seednet_common::{OverlayAddr, PeerId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -14,7 +14,10 @@ pub enum Message {
     Heartbeat,
     Ping,
     Pong,
-    SessionInit { peer_id: PeerId, overlay: OverlayAddr },
+    SessionInit {
+        peer_id: PeerId,
+        overlay: OverlayAddr,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

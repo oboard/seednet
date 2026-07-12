@@ -19,7 +19,10 @@ pub mod noise;
 pub mod seed;
 
 pub use device::{DeviceKeys, DeviceKeysBytes, DeviceSeedBytes};
-pub use noise::{InitiatorHandshake, ResponderHandshake, SecureTransport, HandshakeResult, complete_handshake_pair};
+pub use noise::{
+    HandshakeResult, InitiatorHandshake, ResponderHandshake, SecureTransport,
+    complete_handshake_pair,
+};
 pub use seed::{derive_infohash, derive_network_secret, derive_overlay_addr};
 
 /// Crypto-crate-local error alias. Forwards to [`seednet_common::Error`] so all

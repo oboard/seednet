@@ -2,11 +2,11 @@ use std::net::Ipv4Addr;
 
 use seednet_common::{OverlayAddr, PeerId, Seed};
 use seednet_crypto::{
-    complete_handshake_pair, derive_network_secret, derive_overlay_addr, DeviceKeys,
-    DeviceSeedBytes,
+    DeviceKeys, DeviceSeedBytes, complete_handshake_pair, derive_network_secret,
+    derive_overlay_addr,
 };
 use seednet_overlay::AllocationTable;
-use seednet_routing::{parse_ipv4_packet, RoutingTable, Router};
+use seednet_routing::{Router, RoutingTable, parse_ipv4_packet};
 
 #[test]
 fn two_devices_get_distinct_overlay_ips_and_routes() {
@@ -48,7 +48,10 @@ fn allocation_collision_resolution() {
 
     if derived_b == overlay_a {
         let overlay_b = table.allocate(id_b);
-        assert_ne!(overlay_b, overlay_a, "collision must be resolved to a different IP");
+        assert_ne!(
+            overlay_b, overlay_a,
+            "collision must be resolved to a different IP"
+        );
         assert_eq!(table.len(), 2);
     } else {
         let overlay_b = table.allocate(id_b);

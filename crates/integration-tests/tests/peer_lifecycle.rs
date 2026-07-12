@@ -18,16 +18,24 @@ async fn full_peer_lifecycle_transitions() {
     let peer = mgr.discover(id, addr).await;
     assert_eq!(peer.state().await, PeerState::Discovering);
 
-    mgr.transition_peer(&id, PeerState::Connecting).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connecting)
+        .await
+        .unwrap();
     assert_eq!(peer.state().await, PeerState::Connecting);
 
-    mgr.transition_peer(&id, PeerState::Handshaking).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Handshaking)
+        .await
+        .unwrap();
     assert_eq!(peer.state().await, PeerState::Handshaking);
 
-    mgr.transition_peer(&id, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connected)
+        .await
+        .unwrap();
     assert_eq!(peer.state().await, PeerState::Connected);
 
-    mgr.transition_peer(&id, PeerState::Disconnected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Disconnected)
+        .await
+        .unwrap();
     assert_eq!(peer.state().await, PeerState::Disconnected);
 }
 
@@ -39,15 +47,23 @@ async fn peer_goes_dead_after_connected() {
     let addr: SocketAddr = "10.0.0.2:4242".parse().unwrap();
 
     let peer = mgr.discover(id, addr).await;
-    mgr.transition_peer(&id, PeerState::Connecting).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Handshaking).await.unwrap();
-    mgr.transition_peer(&id, PeerState::Connected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Connecting)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Handshaking)
+        .await
+        .unwrap();
+    mgr.transition_peer(&id, PeerState::Connected)
+        .await
+        .unwrap();
 
     mgr.transition_peer(&id, PeerState::Dead).await.unwrap();
     assert_eq!(peer.state().await, PeerState::Dead);
 
     // Dead peer can transition back to Disconnected for reconnection
-    mgr.transition_peer(&id, PeerState::Disconnected).await.unwrap();
+    mgr.transition_peer(&id, PeerState::Disconnected)
+        .await
+        .unwrap();
     assert_eq!(peer.state().await, PeerState::Disconnected);
 }
 
@@ -63,13 +79,27 @@ async fn event_sequence_for_lifecycle() {
     // Discover
     mgr.discover(id, addr).await;
     let evt = rx.try_recv().unwrap();
-    assert!(matches!(evt, seednet_peer::PeerEvent::Discovered { id: _, underlay } if underlay == addr));
+    assert!(
+        matches!(evt, seednet_peer::PeerEvent::Discovered { id: _, underlay } if underlay == addr)
+    );
 
     // Transition through states
     let transitions = [
-        (PeerState::Connecting, PeerState::Discovering, PeerState::Connecting),
-        (PeerState::Handshaking, PeerState::Connecting, PeerState::Handshaking),
-        (PeerState::Connected, PeerState::Handshaking, PeerState::Connected),
+        (
+            PeerState::Connecting,
+            PeerState::Discovering,
+            PeerState::Connecting,
+        ),
+        (
+            PeerState::Handshaking,
+            PeerState::Connecting,
+            PeerState::Handshaking,
+        ),
+        (
+            PeerState::Connected,
+            PeerState::Handshaking,
+            PeerState::Connected,
+        ),
     ];
 
     for (next, expected_from, expected_to) in transitions {
@@ -104,8 +134,12 @@ async fn multiple_peers_simultaneously() {
 
     // Transition each peer to Connected
     for id in &ids {
-        mgr.transition_peer(id, PeerState::Connecting).await.unwrap();
-        mgr.transition_peer(id, PeerState::Handshaking).await.unwrap();
+        mgr.transition_peer(id, PeerState::Connecting)
+            .await
+            .unwrap();
+        mgr.transition_peer(id, PeerState::Handshaking)
+            .await
+            .unwrap();
         mgr.transition_peer(id, PeerState::Connected).await.unwrap();
     }
 
@@ -123,10 +157,7 @@ async fn multiple_peers_simultaneously() {
 /// Session expires after the timeout period.
 #[test]
 fn session_expires_after_timeout() {
-    let mut session = Session::with_config(
-        Duration::from_millis(1),
-        Duration::from_millis(50),
-    );
+    let mut session = Session::with_config(Duration::from_millis(1), Duration::from_millis(50));
 
     assert!(!session.is_expired());
 
@@ -142,10 +173,7 @@ fn session_expires_after_timeout() {
 /// Session heartbeat timing.
 #[test]
 fn session_heartbeat_timing() {
-    let mut session = Session::with_config(
-        Duration::from_millis(100),
-        Duration::from_secs(60),
-    );
+    let mut session = Session::with_config(Duration::from_millis(100), Duration::from_secs(60));
 
     // Right after creation, no heartbeat needed yet
     // (elapsed is ~0, which is < 100ms)

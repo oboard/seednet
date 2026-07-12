@@ -23,11 +23,7 @@ pub fn decode_frame(data: &[u8]) -> Result<&[u8]> {
             data.len()
         )));
     }
-    let len = u32::from_be_bytes(
-        data[..HEADER_LEN]
-            .try_into()
-            .expect("HEADER_LEN == 4"),
-    ) as usize;
+    let len = u32::from_be_bytes(data[..HEADER_LEN].try_into().expect("HEADER_LEN == 4")) as usize;
     if data.len() < HEADER_LEN + len {
         return Err(Error::NoiseTransport(format!(
             "frame truncated: expected {} payload bytes, got {}",

@@ -26,9 +26,7 @@ pub const STATUS_FILENAME: &str = "status.json";
 
 /// Default per-user SeedNet state directory: `~/.seednet`.
 pub fn default_state_dir() -> Result<PathBuf> {
-    let base = dirs::home_dir().ok_or_else(|| {
-        Error::IdentityMissing(PathBuf::from("$HOME"))
-    })?;
+    let base = dirs::home_dir().ok_or_else(|| Error::IdentityMissing(PathBuf::from("$HOME")))?;
     Ok(base.join(".seednet"))
 }
 

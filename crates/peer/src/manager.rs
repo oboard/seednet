@@ -18,10 +18,22 @@ pub const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PeerEvent {
-    Discovered { id: PeerId, underlay: SocketAddr },
-    StateChanged { id: PeerId, from: PeerState, to: PeerState },
-    OverlayAssigned { id: PeerId, overlay: OverlayAddr },
-    Removed { id: PeerId },
+    Discovered {
+        id: PeerId,
+        underlay: SocketAddr,
+    },
+    StateChanged {
+        id: PeerId,
+        from: PeerState,
+        to: PeerState,
+    },
+    OverlayAssigned {
+        id: PeerId,
+        overlay: OverlayAddr,
+    },
+    Removed {
+        id: PeerId,
+    },
 }
 
 impl std::fmt::Display for PeerEvent {
@@ -108,12 +120,10 @@ impl PeerManager {
         id: &PeerId,
         next: PeerState,
     ) -> std::result::Result<PeerState, TransitionError> {
-        let peer = self
-            .get(id)
-            .ok_or(TransitionError::InvalidTransition {
-                from: PeerState::Dead,
-                to: next,
-            })?;
+        let peer = self.get(id).ok_or(TransitionError::InvalidTransition {
+            from: PeerState::Dead,
+            to: next,
+        })?;
         let prev = peer.state().await;
         let result = peer.transition(next).await?;
         let _ = self.tx.send(PeerEvent::StateChanged {
@@ -127,7 +137,9 @@ impl PeerManager {
     pub async fn assign_overlay(&self, id: &PeerId, overlay: OverlayAddr) -> bool {
         if let Some(peer) = self.get(id) {
             peer.set_overlay_addr(overlay).await;
-            let _ = self.tx.send(PeerEvent::OverlayAssigned { id: *id, overlay });
+            let _ = self
+                .tx
+                .send(PeerEvent::OverlayAssigned { id: *id, overlay });
             true
         } else {
             false
@@ -217,7 +229,9 @@ mod tests {
         mgr.discover(id, addr).await;
         let mut rx = mgr.subscribe();
         let _ = rx.try_recv();
-        mgr.transition_peer(&id, PeerState::Connecting).await.unwrap();
+        mgr.transition_peer(&id, PeerState::Connecting)
+            .await
+            .unwrap();
         let evt = rx.try_recv().unwrap();
         assert_eq!(
             evt,

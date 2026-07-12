@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 
-use seednet_common::{Error, OverlayAddr, PeerId, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX};
+use seednet_common::{Error, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX, OverlayAddr, PeerId};
 use seednet_crypto::SecureTransport;
 
 const IPV4_HEADER_MIN_LEN: usize = 20;
@@ -32,8 +32,18 @@ pub fn parse_ipv4_packet(data: &[u8]) -> std::result::Result<ParsedPacket, Error
         )));
     }
 
-    let src_ip = Ipv4Addr::new(data[IPV4_SRC_OFFSET], data[IPV4_SRC_OFFSET + 1], data[IPV4_SRC_OFFSET + 2], data[IPV4_SRC_OFFSET + 3]);
-    let dst_ip = Ipv4Addr::new(data[IPV4_DST_OFFSET], data[IPV4_DST_OFFSET + 1], data[IPV4_DST_OFFSET + 2], data[IPV4_DST_OFFSET + 3]);
+    let src_ip = Ipv4Addr::new(
+        data[IPV4_SRC_OFFSET],
+        data[IPV4_SRC_OFFSET + 1],
+        data[IPV4_SRC_OFFSET + 2],
+        data[IPV4_SRC_OFFSET + 3],
+    );
+    let dst_ip = Ipv4Addr::new(
+        data[IPV4_DST_OFFSET],
+        data[IPV4_DST_OFFSET + 1],
+        data[IPV4_DST_OFFSET + 2],
+        data[IPV4_DST_OFFSET + 3],
+    );
 
     Ok(ParsedPacket {
         src_ip,
@@ -104,7 +114,11 @@ pub struct Router {
 
 impl Router {
     pub fn new(table: RoutingTable, our_overlay: OverlayAddr) -> Self {
-        Self { table, transports: HashMap::new(), our_overlay }
+        Self {
+            table,
+            transports: HashMap::new(),
+            our_overlay,
+        }
     }
 
     pub fn table(&self) -> &RoutingTable {
@@ -127,7 +141,10 @@ impl Router {
         self.transports.contains_key(peer_id)
     }
 
-    pub fn route_outbound(&mut self, packet: &[u8]) -> std::result::Result<Option<(PeerId, Vec<u8>)>, Error> {
+    pub fn route_outbound(
+        &mut self,
+        packet: &[u8],
+    ) -> std::result::Result<Option<(PeerId, Vec<u8>)>, Error> {
         let parsed = parse_ipv4_packet(packet)?;
         if !self.table.is_overlay_dst(parsed.dst_ip) {
             return Ok(None);
@@ -147,9 +164,14 @@ impl Router {
         Ok(Some((peer_id, encrypted)))
     }
 
-    pub fn route_inbound(&mut self, peer_id: &PeerId, encrypted: &[u8]) -> std::result::Result<Vec<u8>, Error> {
-        let transport = self.transports.get_mut(peer_id)
-            .ok_or_else(|| Error::NoiseTransport(format!("no transport for peer {}", peer_id.short())))?;
+    pub fn route_inbound(
+        &mut self,
+        peer_id: &PeerId,
+        encrypted: &[u8],
+    ) -> std::result::Result<Vec<u8>, Error> {
+        let transport = self.transports.get_mut(peer_id).ok_or_else(|| {
+            Error::NoiseTransport(format!("no transport for peer {}", peer_id.short()))
+        })?;
         let decrypted = transport.decrypt(encrypted)?;
         let _parsed = parse_ipv4_packet(&decrypted)?;
         Ok(decrypted)
@@ -163,8 +185,10 @@ impl Router {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use seednet_crypto::{complete_handshake_pair, derive_network_secret, DeviceKeys, DeviceSeedBytes};
     use seednet_common::Seed;
+    use seednet_crypto::{
+        DeviceKeys, DeviceSeedBytes, complete_handshake_pair, derive_network_secret,
+    };
 
     fn test_peer_id(n: u8) -> PeerId {
         PeerId::from_bytes([n; 32])
@@ -287,7 +311,11 @@ mod tests {
         let mut router = Router::new(table, our);
         router.add_transport(test_peer_id(99), t_a);
 
-        let pkt = make_ipv4_packet(Ipv4Addr::new(10, 88, 1, 1), Ipv4Addr::new(192, 168, 1, 1), 20);
+        let pkt = make_ipv4_packet(
+            Ipv4Addr::new(10, 88, 1, 1),
+            Ipv4Addr::new(192, 168, 1, 1),
+            20,
+        );
         assert!(router.route_outbound(&pkt).unwrap().is_none());
     }
 
@@ -348,7 +376,10 @@ mod tests {
 
     #[test]
     fn router_inbound_unknown_peer_fails() {
-        let mut router = Router::new(RoutingTable::new(), OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1)));
+        let mut router = Router::new(
+            RoutingTable::new(),
+            OverlayAddr::new(Ipv4Addr::new(10, 88, 1, 1)),
+        );
         let unknown = test_peer_id(99);
         let result = router.route_inbound(&unknown, &[0u8; 64]);
         assert!(result.is_err());

@@ -3,13 +3,13 @@
 use std::net::Ipv4Addr;
 
 use hkdf::Hkdf;
+use seednet_common::Seed;
 use seednet_common::{
-    InfoHash, NetworkSecret, OverlayAddr, PeerId, PROTOCOL_MAGIC, OVERLAY_HOST_RANGE_START,
-    OVERLAY_SUBNET_BASE,
+    InfoHash, NetworkSecret, OVERLAY_HOST_RANGE_START, OVERLAY_SUBNET_BASE, OverlayAddr,
+    PROTOCOL_MAGIC, PeerId,
 };
 use sha1::{Digest as _, Sha1};
 use sha2::Sha256;
-use seednet_common::Seed;
 
 use seednet_common::NOISE_PROLOGUE_LEN;
 
@@ -112,7 +112,10 @@ mod tests {
         let addr = derive_overlay_addr(&id);
         let octets = addr.ip().octets();
         assert_eq!(&octets[..2], &[10, 88], "addr {} not in /16", addr);
-        assert!(octets[2] >= 1 && octets[2] <= 254, "third octet out of range");
+        assert!(
+            octets[2] >= 1 && octets[2] <= 254,
+            "third octet out of range"
+        );
     }
 
     #[test]
@@ -158,6 +161,9 @@ mod tests {
         let h = derive_infohash(&secret).to_string();
         assert_eq!(h.len(), 40, "hex length");
         // Sanity: it's all lowercase hex.
-        assert!(h.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            h.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 }

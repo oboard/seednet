@@ -3,18 +3,20 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use seednet_common::{Error, InfoHash, NetworkSecret, OverlayAddr, PeerId, Seed, DEFAULT_PORT, OVERLAY_MTU};
+use seednet_common::{
+    DEFAULT_PORT, Error, InfoHash, NetworkSecret, OVERLAY_MTU, OverlayAddr, PeerId, Seed,
+};
 use seednet_config::StateDir;
 use seednet_crypto::{
-    derive_infohash, derive_network_secret, derive_overlay_addr, DeviceKeys,
-    InitiatorHandshake, ResponderHandshake,
+    DeviceKeys, InitiatorHandshake, ResponderHandshake, derive_infohash, derive_network_secret,
+    derive_overlay_addr,
 };
 use seednet_dht::DhtDiscovery;
 use seednet_overlay::AllocationTable;
 use seednet_peer::{PeerManager, PeerState};
 use seednet_routing::RoutingTable;
-use seednet_tun::{AsyncTunDevice, TunConfig, platform};
 use seednet_tun::subnet_mask;
+use seednet_tun::{AsyncTunDevice, TunConfig, platform};
 
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
@@ -32,7 +34,11 @@ pub struct SeedNetConfig {
 
 impl SeedNetConfig {
     pub fn new(seed: Seed, port: u16, state_dir: StateDir) -> Self {
-        Self { seed, port, state_dir }
+        Self {
+            seed,
+            port,
+            state_dir,
+        }
     }
 }
 
@@ -135,11 +141,14 @@ impl SeedNetEngine {
             &tun_name,
             self.our_overlay.ip(),
             subnet_mask(seednet_common::OVERLAY_SUBNET_PREFIX),
-        ).await {
+        )
+        .await
+        {
             tracing::warn!(target: "seednet", error = %e, "platform IP config failed (may need manual ifconfig/ip)");
         }
 
-        let udp_socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await
+        let udp_socket = UdpSocket::bind(format!("0.0.0.0:{port}"))
+            .await
             .map_err(Error::Io)?;
         tracing::info!(target: "seednet", port, "UDP socket bound");
 
@@ -159,7 +168,9 @@ impl SeedNetEngine {
         match bootstrapped {
             Ok(true) => tracing::info!(target: "seednet", "DHT bootstrapped"),
             Ok(false) => tracing::warn!(target: "seednet", "DHT bootstrap returned false"),
-            Err(_) => tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s, continuing anyway"),
+            Err(_) => {
+                tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s, continuing anyway")
+            }
         }
 
         if let Err(e) = dht.announce(&self.infohash, port).await {
@@ -260,7 +271,8 @@ impl SeedNetEngine {
                         }
                         drop(a2p);
 
-                        if let Ok(mut responder) = ResponderHandshake::new(&network_secret_resp, &device_keys_resp)
+                        if let Ok(mut responder) =
+                            ResponderHandshake::new(&network_secret_resp, &device_keys_resp)
                             && responder.read_message_a(data).is_ok()
                             && let Ok(msg_b) = responder.write_message_b(&[])
                         {
@@ -270,7 +282,8 @@ impl SeedNetEngine {
                             match udp_in.recv_from(&mut cbuf).await {
                                 Ok((cn, cfrom)) if cfrom == from => {
                                     if let Ok(resp_result) = responder.finish(&cbuf[..cn]) {
-                                        let remote_static = *resp_result.transport.remote_static_key();
+                                        let remote_static =
+                                            *resp_result.transport.remote_static_key();
                                         let peer_id = PeerId::from_bytes(remote_static);
 
                                         tracing::info!(
@@ -298,9 +311,15 @@ impl SeedNetEngine {
                                         drop(rt);
 
                                         let _peer = peer_mgr_in.discover(peer_id, from).await;
-                                        let _ = peer_mgr_in.transition_peer(&peer_id, PeerState::Connecting).await;
-                                        let _ = peer_mgr_in.transition_peer(&peer_id, PeerState::Handshaking).await;
-                                        let _ = peer_mgr_in.transition_peer(&peer_id, PeerState::Connected).await;
+                                        let _ = peer_mgr_in
+                                            .transition_peer(&peer_id, PeerState::Connecting)
+                                            .await;
+                                        let _ = peer_mgr_in
+                                            .transition_peer(&peer_id, PeerState::Handshaking)
+                                            .await;
+                                        let _ = peer_mgr_in
+                                            .transition_peer(&peer_id, PeerState::Connected)
+                                            .await;
 
                                         tracing::info!(
                                             target: "seednet",
@@ -352,7 +371,10 @@ impl SeedNetEngine {
 
                             tracing::info!(target: "seednet", addr = %addr, "initiating handshake to discovered peer");
 
-                            let mut initiator = match InitiatorHandshake::new(&network_secret_dht, &device_keys_dht) {
+                            let mut initiator = match InitiatorHandshake::new(
+                                &network_secret_dht,
+                                &device_keys_dht,
+                            ) {
                                 Ok(i) => i,
                                 Err(_) => continue,
                             };
@@ -370,7 +392,9 @@ impl SeedNetEngine {
                             let (n, from) = match tokio::time::timeout(
                                 Duration::from_secs(5),
                                 udp_dht.recv_from(&mut buf),
-                            ).await {
+                            )
+                            .await
+                            {
                                 Ok(Ok(r)) => r,
                                 _ => continue,
                             };
@@ -424,9 +448,15 @@ impl SeedNetEngine {
                             drop(rt);
 
                             let _peer = peer_mgr_dht.discover(peer_id, addr).await;
-                            let _ = peer_mgr_dht.transition_peer(&peer_id, PeerState::Connecting).await;
-                            let _ = peer_mgr_dht.transition_peer(&peer_id, PeerState::Handshaking).await;
-                            let _ = peer_mgr_dht.transition_peer(&peer_id, PeerState::Connected).await;
+                            let _ = peer_mgr_dht
+                                .transition_peer(&peer_id, PeerState::Connecting)
+                                .await;
+                            let _ = peer_mgr_dht
+                                .transition_peer(&peer_id, PeerState::Handshaking)
+                                .await;
+                            let _ = peer_mgr_dht
+                                .transition_peer(&peer_id, PeerState::Connected)
+                                .await;
                         }
                     }
                     Err(e) => {
@@ -464,7 +494,9 @@ impl SeedNetEngine {
         });
 
         let ctrl_c = tokio::signal::ctrl_c();
-        ctrl_c.await.map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        ctrl_c
+            .await
+            .map_err(|e| Error::Io(std::io::Error::other(e)))?;
 
         tracing::info!(target: "seednet", "Shutting down …");
         outbound_handle.abort();
@@ -508,11 +540,7 @@ mod tests {
     #[test]
     fn engine_new_derives_identity() {
         let state_dir = temp_state_dir();
-        let config = SeedNetConfig::new(
-            Seed::from_passphrase("test engine"),
-            4242,
-            state_dir,
-        );
+        let config = SeedNetConfig::new(Seed::from_passphrase("test engine"), 4242, state_dir);
         let engine = SeedNetEngine::new(config).unwrap();
         assert_eq!(engine.our_overlay().ip().octets()[0], 10);
         assert_eq!(engine.our_overlay().ip().octets()[1], 88);
@@ -522,11 +550,7 @@ mod tests {
     #[tokio::test]
     async fn allocation_works() {
         let state_dir = temp_state_dir();
-        let config = SeedNetConfig::new(
-            Seed::from_passphrase("alloc test"),
-            4242,
-            state_dir,
-        );
+        let config = SeedNetConfig::new(Seed::from_passphrase("alloc test"), 4242, state_dir);
         let engine = SeedNetEngine::new(config).unwrap();
         let mut table = engine.allocation_table().write().await;
         let addr = table.allocate(engine.our_peer_id());
@@ -538,11 +562,7 @@ mod tests {
     #[test]
     fn print_status_does_not_panic() {
         let state_dir = temp_state_dir();
-        let config = SeedNetConfig::new(
-            Seed::from_passphrase("status test"),
-            4242,
-            state_dir,
-        );
+        let config = SeedNetConfig::new(Seed::from_passphrase("status test"), 4242, state_dir);
         let engine = SeedNetEngine::new(config).unwrap();
         print_status(&engine);
     }

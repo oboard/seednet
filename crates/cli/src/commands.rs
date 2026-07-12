@@ -7,12 +7,10 @@
 //! implementations arrive in later milestones.
 
 use anyhow::Result;
-use seednet_common::{Seed, INFOHASH_LEN};
+use seednet_common::{INFOHASH_LEN, Seed};
 use seednet_config::StateDir;
 use seednet_core::{SeedNetConfig, SeedNetEngine};
-use seednet_crypto::{
-    derive_infohash, derive_network_secret, derive_overlay_addr, DeviceKeys,
-};
+use seednet_crypto::{DeviceKeys, derive_infohash, derive_network_secret, derive_overlay_addr};
 
 /// Print the derived network identity for the given seed.
 pub async fn identity(state_dir: &StateDir, seed: &Seed) -> Result<()> {
@@ -26,16 +24,18 @@ pub async fn identity(state_dir: &StateDir, seed: &Seed) -> Result<()> {
     println!("──────────────────────────────────────────────────────────");
     println!("State dir      : {}", state_dir.path().display());
     println!("Network secret : {}", short_hex(secret.as_bytes(), 8));
-    println!(
-        "DHT infohash   : {}  ({} bytes)",
-        infohash,
-        INFOHASH_LEN
-    );
+    println!("DHT infohash   : {}  ({} bytes)", infohash, INFOHASH_LEN);
     println!("This device    :");
     println!("  PeerId (ed25519 pub) : {}", peer_id);
-    println!("  X25519 pub (noise)   : {}", short_hex(&keys.x25519_public_key(), 32));
+    println!(
+        "  X25519 pub (noise)   : {}",
+        short_hex(&keys.x25519_public_key(), 32)
+    );
     println!("  Overlay IPv4         : {}", overlay);
-    println!("  Identity file        : {}", state_dir.identity_path().display());
+    println!(
+        "  Identity file        : {}",
+        state_dir.identity_path().display()
+    );
     println!("──────────────────────────────────────────────────────────");
 
     Ok(())
@@ -77,7 +77,10 @@ pub async fn down(state_dir: &StateDir) -> Result<()> {
             println!("Stopped.");
         }
         None => {
-            println!("SeedNet is not running (no PID file at {}).", state_dir.pid_path().display());
+            println!(
+                "SeedNet is not running (no PID file at {}).",
+                state_dir.pid_path().display()
+            );
         }
     }
     Ok(())
@@ -108,12 +111,9 @@ pub async fn discover(
 
     // Wait for the DHT to bootstrap.
     println!("Bootstrapping …");
-    let bootstrapped = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        dht.bootstrapped(),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("DHT bootstrap timed out (15s)"))?;
+    let bootstrapped = tokio::time::timeout(std::time::Duration::from_secs(15), dht.bootstrapped())
+        .await
+        .map_err(|_| anyhow::anyhow!("DHT bootstrap timed out (15s)"))?;
 
     if bootstrapped {
         println!("Bootstrapped successfully.");
@@ -167,7 +167,10 @@ pub async fn discover(
 
     println!();
     println!("──────────────────────────────────────────────────────────");
-    println!("Discovery complete. {} unique peer(s) found:", all_peers.len());
+    println!(
+        "Discovery complete. {} unique peer(s) found:",
+        all_peers.len()
+    );
     for peer in &all_peers {
         println!("  {peer}");
     }
