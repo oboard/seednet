@@ -5,11 +5,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Peer abstraction, state machine, and manager for SeedNet"
+description = "Peer abstraction, state machine, message layer for SeedNet"
 
 [dependencies]
 seednet-common = { workspace = true }
+seednet-crypto = { workspace = true }
 dashmap = { workspace = true }
-tokio = { workspace = true, features = ["sync", "time"] }
+tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macros", "rt"] }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
