@@ -29,26 +29,7 @@ pub async fn configure_interface(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) ->
 
     #[cfg(target_os = "linux")]
     {
-        let prefix = seednet_common::OVERLAY_SUBNET_PREFIX;
-        let ip_str = format!("{}/{prefix}", ip);
-        let _ = netmask;
-        let output = tokio::process::Command::new("ip")
-            .args(["addr", "add", &ip_str, "dev", name])
-            .output()
-            .await;
-
-        match output {
-            Ok(o) if o.status.success() => {}
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                if !stderr.contains("File exists") {
-                    tracing::warn!(target: "seednet", "ip addr add failed: {stderr}");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(target: "seednet", "ip command failed: {e}");
-            }
-        }
+        let _ = (ip, netmask);
 
         let output = tokio::process::Command::new("ip")
             .args(["link", "set", name, "up"])
@@ -59,6 +40,28 @@ pub async fn configure_interface(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) ->
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             tracing::warn!(target: "seednet", "ip link set up failed: {stderr}");
+        }
+
+        let prefix = seednet_common::OVERLAY_SUBNET_PREFIX;
+        let subnet = format!("{}/{prefix}", seednet_common::OVERLAY_SUBNET_BASE);
+        let output = tokio::process::Command::new("ip")
+            .args(["route", "add", &subnet, "dev", name])
+            .output()
+            .await;
+
+        match output {
+            Ok(o) if o.status.success() => {
+                tracing::info!(target: "seednet", subnet = %subnet, dev = %name, "route added");
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                if !stderr.contains("File exists") {
+                    tracing::warn!(target: "seednet", "ip route add failed: {stderr}");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(target: "seednet", "ip route command failed: {e}");
+            }
         }
     }
 
