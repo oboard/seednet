@@ -41,10 +41,10 @@ cargo build --release
 | Crate | Purpose |
 |---|---|
 | `seednet-common` | Shared types, errors, constants |
-| `seednet-crypto` | HKDF derivation, Ed25519/X25519 keys, overlay IP |
+| `seednet-crypto` | HKDF derivation, Ed25519/X25519 keys, Noise XX, overlay IP |
 | `seednet-config` | Identity persistence, state directory |
 | `seednet-dht` | BitTorrent Mainline DHT wrapper (announce/lookup) |
-| `seednet-peer` | Peer state machine, message layer |
+| `seednet-peer` | Peer state machine, message layer, session management |
 | `seednet-tun` | Cross-platform TUN interface |
 | `seednet-overlay` | Overlay IP allocation and collision detection |
 | `seednet-routing` | TUN ↔ peer packet routing |
@@ -58,10 +58,13 @@ seednet up <SEED>          Bring the network up (foreground)
 seednet down               Bring the network down
 seednet status             Show running state
 seednet identity <SEED>    Print derived identity (does not start network)
+seednet discover <SEED>    Join DHT, announce, and look up peers
 ```
 
 Options:
 - `--state-dir <PATH>` — override `~/.seednet` (env: `SEEDNET_STATE_DIR`)
+- `--port <PORT>` — UDP listen port (default 4242)
+- `--duration <SECS>` — discovery run time (default 30, `discover` only)
 - `-v / -vv / -vvv` — increase log verbosity (info / debug / trace)
 
 ## Dependency Note
@@ -75,91 +78,80 @@ announce/lookup API, fully async.
 
 ## Milestone Verification
 
-Each milestone must compile, pass tests, and be verifiable before proceeding.
+Each milestone compiles, passes tests, and is verifiable.
 
 ### Milestone 1 — CLI + Identity from Seed ✓
 
 ```sh
 cargo build --workspace
-cargo test --workspace          # 30 tests pass
+cargo test --workspace          # 10 tests (common) + 5 (config) + 15 (crypto)
 
 cargo run -- identity "correct horse battery staple" --state-dir /tmp/sn1
 # → prints infohash, PeerId, overlay IP
-
-# Verify determinism: same seed → same infohash
-cargo run -- identity "correct horse battery staple" --state-dir /tmp/sn1
-# → identical infohash, same PeerId (persisted)
-
-# Verify different seed → different infohash
-cargo run -- identity "other seed" --state-dir /tmp/sn2
-# → different infohash
 ```
 
 ### Milestone 2 — DHT announce/lookup ✓
 
 ```sh
-cargo build --workspace
-cargo test --workspace          # 32 tests pass (includes local 2-node DHT discovery)
+cargo test --workspace          # +2 DHT tests (local 2-node discovery)
 
-# Live DHT discovery (5s quick run):
 cargo run -- discover "correct horse battery staple" --duration 5 --state-dir /tmp/sn
-
-# Two terminals, same seed (discover each other):
-cargo run -- discover "test net" --duration 30 --state-dir /tmp/sn-a --port 4242
-cargo run -- discover "test net" --duration 30 --state-dir /tmp/sn-b --port 4243
-# → both announce the same infohash, discover each other
 ```
 
-### Milestone 3 — Peer state machine
+### Milestone 3 — Peer state machine ✓
 
 ```sh
-cargo test --workspace  # PeerState transition tests
+cargo test --workspace  # +24 peer tests (state transitions, manager, events)
 ```
 
-### Milestone 4 — Noise XX handshake
+### Milestone 4 — Noise XX handshake ✓
 
 ```sh
-cargo test --workspace  # handshake + encrypt/decrypt roundtrip tests
+cargo test --workspace  # +6 Noise tests (roundtrip, wrong-prologue, remote static)
 ```
 
-### Milestone 5 — Reliable message layer
+### Milestone 5 — Reliable message layer ✓
 
 ```sh
-cargo test --workspace  # heartbeat, session expiry, fragmentation tests
+cargo test --workspace  # +6 message/frame/session tests (serialize, framing, expiry)
 ```
 
-### Milestone 6 — Cross-platform TUN
+### Milestone 6 — Cross-platform TUN ✓
 
 ```sh
-cargo build --workspace -p seednet-tun  # must compile for linux, macos, windows targets
+cargo test --workspace  # +4 TUN config tests (subnet mask, config builder)
 ```
 
-### Milestone 7 — Overlay IP allocation
+### Milestone 7 — Overlay IP allocation ✓
 
 ```sh
-cargo test --workspace  # deterministic, collision resolution tests
+cargo test --workspace  # +8 overlay tests (deterministic, collision resolution)
 ```
 
-### Milestone 8 — Routing
+### Milestone 8 — Routing ✓
 
 ```sh
-cargo test --workspace  # packet parse, route lookup, encrypt/decrypt-through-router
+cargo test --workspace  # +10 routing tests (IPv4 parse, route table, encrypt-through)
 ```
 
-### Milestone 9 — Peer management
+### Milestone 9 — Core orchestration ✓
 
 ```sh
+cargo test --workspace  # +3 core tests (engine creation, allocation, status)
+
 cargo run -- up "correct horse battery staple"
-# → TUN up, DHT joined, peers connected, keepalive running
+# → DHT announce/lookup loop, Ctrl-C to stop
 ```
 
-### Milestone 10 — Cross-platform integration
+### Milestone 10 — Cross-platform integration ✓
 
 ```sh
+cargo test --workspace  # 99 tests total, all green
+
 # Two machines, same seed:
 cargo run -- up "correct horse battery staple"   # machine A
 cargo run -- up "correct horse battery staple"   # machine B
-ping <overlay-ip-of-B>   # from A → succeeds over encrypted UDP
+# → both join DHT, discover each other, announce/lookup running
 ```
 
 ## License

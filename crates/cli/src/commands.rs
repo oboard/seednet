@@ -9,6 +9,7 @@
 use anyhow::Result;
 use seednet_common::{Seed, INFOHASH_LEN};
 use seednet_config::StateDir;
+use seednet_core::{SeedNetConfig, SeedNetEngine};
 use seednet_crypto::{
     derive_infohash, derive_network_secret, derive_overlay_addr, DeviceKeys,
 };
@@ -42,27 +43,21 @@ pub async fn identity(state_dir: &StateDir, seed: &Seed) -> Result<()> {
 
 /// Bring the network up.
 pub async fn up(state_dir: &StateDir, seed: &Seed, port: u16) -> Result<()> {
-    let secret = derive_network_secret(seed);
-    let infohash = derive_infohash(&secret);
-    let keys = state_dir.load_or_create_identity()?;
-    let peer_id = keys.peer_id();
-    let overlay = derive_overlay_addr(&peer_id);
+    let config = SeedNetConfig::new(seed.clone(), port, state_dir.clone());
+    let engine = SeedNetEngine::new(config)?;
 
-    tracing::info!(target: "seednet", "bringing network up (port {port})");
     println!("SeedNet starting …");
-    println!("  infohash : {infohash}");
-    println!("  overlay  : {overlay} (this device)");
+    println!("  infohash : {}", engine.infohash());
+    println!("  overlay  : {} (this device)", engine.our_overlay());
+    println!("  peer id  : {}", engine.our_peer_id());
     println!("  port     : {port}");
     println!("  identity : {}", state_dir.identity_path().display());
 
-    // Persist our own PID so `down`/`status` can find us.
     state_dir.write_pid(std::process::id())?;
 
-    // Milestone 1 stops here. Later milestones plug in the DHT announce loop,
-    // peer connection state machine, Noise handshake, TUN interface, and
-    // routing. We install a Ctrl-C handler so the PID file is cleaned up.
-    println!("Press Ctrl-C to stop (full networking arrives in later milestones).");
-    wait_for_signal().await;
+    if let Err(e) = engine.run().await {
+        tracing::error!(target: "seednet", error = %e, "engine error");
+    }
 
     println!("SeedNet shutting down …");
     state_dir.clear_pid()?;
@@ -214,30 +209,6 @@ fn short_hex(bytes: &[u8], take: usize) -> String {
         s.push_str(&format!("{:02x}", b));
     }
     s
-}
-
-async fn wait_for_signal() {
-    // Ctrl-C on all platforms; SIGTERM on Unix.
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("install ctrl-c handler");
-    };
-
-    #[cfg(unix)]
-    let term = async {
-        use tokio::signal::unix::{signal, SignalKind};
-        let mut s = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-        s.recv().await;
-    };
-
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = term => {},
-    }
 }
 
 fn signal_pid(pid: u32) -> Result<()> {
