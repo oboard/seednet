@@ -160,8 +160,9 @@ impl SeedNetEngine {
             Arc::new(RwLock::new(HashMap::new()));
         let addr_to_peer: Arc<RwLock<HashMap<SocketAddr, PeerId>>> =
             Arc::new(RwLock::new(HashMap::new()));
-        let pending_handshakes: Arc<RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        let pending_handshakes: Arc<
+            RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         let dht = DhtDiscovery::start_with(0, std::net::Ipv4Addr::UNSPECIFIED, &[])
             .map_err(|e| Error::Dht(format!("DHT start failed: {e}")))?;
@@ -352,25 +353,15 @@ impl SeedNetEngine {
                                             rt.add_route(overlay, peer_id);
                                             drop(rt);
 
-                                            let _peer =
-                                                peer_mgr_in.discover(peer_id, from).await;
+                                            let _peer = peer_mgr_in.discover(peer_id, from).await;
                                             let _ = peer_mgr_in
-                                                .transition_peer(
-                                                    &peer_id,
-                                                    PeerState::Connecting,
-                                                )
+                                                .transition_peer(&peer_id, PeerState::Connecting)
                                                 .await;
                                             let _ = peer_mgr_in
-                                                .transition_peer(
-                                                    &peer_id,
-                                                    PeerState::Handshaking,
-                                                )
+                                                .transition_peer(&peer_id, PeerState::Handshaking)
                                                 .await;
                                             let _ = peer_mgr_in
-                                                .transition_peer(
-                                                    &peer_id,
-                                                    PeerState::Connected,
-                                                )
+                                                .transition_peer(&peer_id, PeerState::Connected)
                                                 .await;
 
                                             tracing::info!(
@@ -488,7 +479,8 @@ impl SeedNetEngine {
                                         tracing::warn!(target: "seednet", "msg B has wrong prefix");
                                         continue;
                                     }
-                                    let msg_b = &msg_b_tagged[NOISE_HANDSHAKE_RESPONDER_PREFIX.len()..];
+                                    let msg_b =
+                                        &msg_b_tagged[NOISE_HANDSHAKE_RESPONDER_PREFIX.len()..];
 
                                     if let Err(e) = initiator.read_message_b(msg_b) {
                                         tracing::warn!(target: "seednet", error = %e, "read_message_b failed");
@@ -503,13 +495,14 @@ impl SeedNetEngine {
                                         }
                                     };
 
-                                    if let Err(e) = udp_dht.send_to(&init_result.msg_bytes, addr).await {
+                                    if let Err(e) =
+                                        udp_dht.send_to(&init_result.msg_bytes, addr).await
+                                    {
                                         tracing::warn!(target: "seednet", error = %e, "send msg C failed");
                                         continue;
                                     }
 
-                                    let remote_static =
-                                        *init_result.transport.remote_static_key();
+                                    let remote_static = *init_result.transport.remote_static_key();
                                     let peer_id = PeerId::from_bytes(remote_static);
 
                                     if peer_id == our_peer_id_dht {
