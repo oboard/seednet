@@ -24,11 +24,6 @@ const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const MAX_DATAGRAM: usize = OVERLAY_MTU + 256;
 
-#[cfg(target_os = "macos")]
-const TUN_HEADER_LEN: usize = 4;
-#[cfg(not(target_os = "macos"))]
-const TUN_HEADER_LEN: usize = 0;
-
 pub struct SeedNetConfig {
     pub seed: Seed,
     pub port: u16,
@@ -185,16 +180,11 @@ impl SeedNetEngine {
         let mut tun_reader = tun_reader;
 
         let outbound_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; OVERLAY_MTU + TUN_HEADER_LEN + 100];
+            let mut buf = vec![0u8; OVERLAY_MTU + 100];
             loop {
                 match tun_reader.recv(&mut buf).await {
                     Ok(n) => {
-                        let start = if TUN_HEADER_LEN > 0 && n > TUN_HEADER_LEN {
-                            TUN_HEADER_LEN
-                        } else {
-                            0
-                        };
-                        let packet = &buf[start..n];
+                        let packet = &buf[..n];
                         if packet.is_empty() {
                             continue;
                         }
@@ -205,17 +195,7 @@ impl SeedNetEngine {
 
                         if dst_ip == our_overlay_out.ip() {
                             let mut writer = tun_writer_out.lock().await;
-                            if TUN_HEADER_LEN > 0 {
-                                let mut frame = vec![0u8; TUN_HEADER_LEN + packet.len()];
-                                frame[0] = 0x00;
-                                frame[1] = 0x00;
-                                frame[2] = 0x00;
-                                frame[3] = 0x02;
-                                frame[TUN_HEADER_LEN..].copy_from_slice(packet);
-                                let _ = writer.send(&frame).await;
-                            } else {
-                                let _ = writer.send(packet).await;
-                            }
+                            let _ = writer.send(packet).await;
                             continue;
                         }
                         let rt = router_out.read().await;
@@ -274,17 +254,7 @@ impl SeedNetEngine {
                             {
                                 drop(ts);
                                 let mut writer = tun_writer_in.lock().await;
-                                if TUN_HEADER_LEN > 0 {
-                                    let mut frame = vec![0u8; TUN_HEADER_LEN + decrypted.len()];
-                                    frame[0] = 0x00;
-                                    frame[1] = 0x00;
-                                    frame[2] = 0x00;
-                                    frame[3] = 0x02;
-                                    frame[TUN_HEADER_LEN..].copy_from_slice(&decrypted);
-                                    let _ = writer.send(&frame).await;
-                                } else {
-                                    let _ = writer.send(&decrypted).await;
-                                }
+                                let _ = writer.send(&decrypted).await;
                             }
                             continue;
                         }
