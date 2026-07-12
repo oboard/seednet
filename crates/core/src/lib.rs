@@ -158,26 +158,28 @@ impl SeedNetEngine {
             .map_err(|e| Error::Dht(format!("DHT start failed: {e}")))?;
 
         tracing::info!(target: "seednet", "Waiting for DHT bootstrap …");
-        let bootstrapped = dht.bootstrapped().await;
-        if bootstrapped {
-            tracing::info!(target: "seednet", "DHT bootstrapped");
-        } else {
-            tracing::warn!(target: "seednet", "DHT bootstrap returned false");
+        let bootstrapped = tokio::time::timeout(Duration::from_secs(15), dht.bootstrapped()).await;
+        match bootstrapped {
+            Ok(true) => tracing::info!(target: "seednet", "DHT bootstrapped"),
+            Ok(false) => tracing::warn!(target: "seednet", "DHT bootstrap returned false"),
+            Err(_) => tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s, continuing anyway"),
         }
 
-        dht.announce(&self.infohash, port).await
-            .map_err(|e| Error::Dht(format!("announce failed: {e}")))?;
-        tracing::info!(target: "seednet", "Announced on DHT");
+        if let Err(e) = dht.announce(&self.infohash, port).await {
+            tracing::warn!(target: "seednet", error = %e, "DHT announce failed, continuing anyway");
+        } else {
+            tracing::info!(target: "seednet", "Announced on DHT");
+        }
 
         let tun_dev = Arc::new(tokio::sync::Mutex::new(tun_device));
         let udp = Arc::new(udp_socket);
-        let our_peer_id_out = self.our_peer_id;
 
         let tun_out = tun_dev.clone();
         let router_out = self.routing_table.clone();
         let transports_out = transports.clone();
         let peer_underlays_out = peer_underlays.clone();
         let udp_out = udp.clone();
+        let our_overlay_out = self.our_overlay;
 
         let outbound_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; OVERLAY_MTU + TUN_HEADER_LEN + 100];
@@ -200,11 +202,24 @@ impl SeedNetEngine {
                             .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
 
                         let rt = router_out.read().await;
+                        if dst_ip == our_overlay_out.ip() {
+                            drop(rt);
+                            let tun = tun_out.lock().await;
+                            if TUN_HEADER_LEN > 0 {
+                                let mut frame = vec![0u8; TUN_HEADER_LEN + packet.len()];
+                                frame[0] = 0x00;
+                                frame[1] = 0x00;
+                                frame[2] = 0x00;
+                                frame[3] = 0x02;
+                                frame[TUN_HEADER_LEN..].copy_from_slice(packet);
+                                let _ = tun.send(&frame).await;
+                            } else {
+                                let _ = tun.send(packet).await;
+                            }
+                            continue;
+                        }
                         if let Some(peer_id) = rt.lookup(dst_ip) {
                             let peer_id = *peer_id;
-                            if peer_id == our_peer_id_out {
-                                continue;
-                            }
                             drop(rt);
                             let mut ts = transports_out.write().await;
                             if let Some(transport) = ts.get_mut(&peer_id)
