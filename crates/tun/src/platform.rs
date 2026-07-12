@@ -2,6 +2,7 @@ use std::net::Ipv4Addr;
 
 use seednet_common::{Error, Result};
 
+#[cfg(unix)]
 pub async fn configure_interface(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
@@ -61,10 +62,13 @@ pub async fn configure_interface(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) ->
         }
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = (name, ip, netmask);
-    }
-
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub async fn configure_interface(_name: &str, _ip: Ipv4Addr, _netmask: Ipv4Addr) -> Result<()> {
+    Err(Error::Io(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "TUN interface configuration is not supported on this platform",
+    )))
 }

@@ -73,13 +73,22 @@ pub fn create_tun(_config: &TunConfig) -> Result<Box<dyn TunDevice>> {
     )))
 }
 
-#[cfg(feature = "real-tun")]
-pub mod real;
+#[cfg(unix)]
+mod real;
 
-#[cfg(feature = "real-tun")]
-pub use real::AsyncTunDevice;
+#[cfg(unix)]
+pub mod platform;
 
-#[cfg(feature = "real-tun")]
+#[cfg(unix)]
+pub use real::{AsyncTunDevice, TunReader, TunWriter};
+
+#[cfg(not(unix))]
+mod stub;
+
+#[cfg(not(unix))]
+pub use stub::{AsyncTunDevice, TunReader, TunWriter};
+
+#[cfg(not(unix))]
 pub mod platform;
 
 #[cfg(test)]

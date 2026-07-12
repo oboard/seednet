@@ -7,13 +7,11 @@ license.workspace = true
 authors.workspace = true
 description = "Cross-platform TUN interface for SeedNet overlay"
 
-[features]
-default = []
-real-tun = ["dep:tun"]
-
 [dependencies]
 seednet-common = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-tun = { workspace = true, optional = true }
+
+[target.'cfg(unix)'.dependencies]
+tun = { workspace = true }
