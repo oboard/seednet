@@ -133,6 +133,8 @@ impl SeedNetEngine {
         let tun_config = TunConfig::new(self.our_overlay);
         let tun_device = AsyncTunDevice::create(&tun_config)?;
         let tun_name = tun_device.name().to_string();
+        let (tun_reader, tun_writer, _) = tun_device.into_split();
+        let tun_writer = Arc::new(tokio::sync::Mutex::new(tun_writer));
 
         if let Err(e) = platform::configure_interface(
             &tun_name,
@@ -171,21 +173,21 @@ impl SeedNetEngine {
             tracing::info!(target: "seednet", "Announced on DHT");
         }
 
-        let tun_dev = Arc::new(tokio::sync::Mutex::new(tun_device));
         let udp = Arc::new(udp_socket);
 
-        let tun_out = tun_dev.clone();
         let router_out = self.routing_table.clone();
         let transports_out = transports.clone();
         let peer_underlays_out = peer_underlays.clone();
         let udp_out = udp.clone();
         let our_overlay_out = self.our_overlay;
+        let tun_writer_out = tun_writer.clone();
+
+        let mut tun_reader = tun_reader;
 
         let outbound_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; OVERLAY_MTU + TUN_HEADER_LEN + 100];
             loop {
-                let tun = tun_out.lock().await;
-                match tun.recv(&mut buf).await {
+                match tun_reader.recv(&mut buf).await {
                     Ok(n) => {
                         let start = if TUN_HEADER_LEN > 0 && n > TUN_HEADER_LEN {
                             TUN_HEADER_LEN
@@ -201,10 +203,8 @@ impl SeedNetEngine {
                             .map(|p| p.dst_ip)
                             .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
 
-                        let rt = router_out.read().await;
                         if dst_ip == our_overlay_out.ip() {
-                            drop(rt);
-                            let tun = tun_out.lock().await;
+                            let mut writer = tun_writer_out.lock().await;
                             if TUN_HEADER_LEN > 0 {
                                 let mut frame = vec![0u8; TUN_HEADER_LEN + packet.len()];
                                 frame[0] = 0x00;
@@ -212,12 +212,13 @@ impl SeedNetEngine {
                                 frame[2] = 0x00;
                                 frame[3] = 0x02;
                                 frame[TUN_HEADER_LEN..].copy_from_slice(packet);
-                                let _ = tun.send(&frame).await;
+                                let _ = writer.send(&frame).await;
                             } else {
-                                let _ = tun.send(packet).await;
+                                let _ = writer.send(packet).await;
                             }
                             continue;
                         }
+                        let rt = router_out.read().await;
                         if let Some(peer_id) = rt.lookup(dst_ip) {
                             let peer_id = *peer_id;
                             drop(rt);
@@ -245,7 +246,7 @@ impl SeedNetEngine {
             }
         });
 
-        let tun_in = tun_dev.clone();
+        let tun_writer_in = tun_writer.clone();
         let udp_in = udp.clone();
         let transports_in = transports.clone();
         let addr_to_peer_in = addr_to_peer.clone();
@@ -272,7 +273,7 @@ impl SeedNetEngine {
                                 && let Ok(decrypted) = transport.decrypt(data)
                             {
                                 drop(ts);
-                                let tun = tun_in.lock().await;
+                                let mut writer = tun_writer_in.lock().await;
                                 if TUN_HEADER_LEN > 0 {
                                     let mut frame = vec![0u8; TUN_HEADER_LEN + decrypted.len()];
                                     frame[0] = 0x00;
@@ -280,9 +281,9 @@ impl SeedNetEngine {
                                     frame[2] = 0x00;
                                     frame[3] = 0x02;
                                     frame[TUN_HEADER_LEN..].copy_from_slice(&decrypted);
-                                    let _ = tun.send(&frame).await;
+                                    let _ = writer.send(&frame).await;
                                 } else {
-                                    let _ = tun.send(&decrypted).await;
+                                    let _ = writer.send(&decrypted).await;
                                 }
                             }
                             continue;

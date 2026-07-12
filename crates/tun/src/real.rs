@@ -5,8 +5,31 @@ use tun::{AbstractDevice, AsyncDevice, Configuration, Layer};
 
 use crate::TunConfig;
 
+pub struct TunReader {
+    inner: tun::DeviceReader,
+}
+
+pub struct TunWriter {
+    inner: tun::DeviceWriter,
+}
+
+impl TunReader {
+    pub async fn recv(&mut self, buf: &mut [u8]) -> Result<usize> {
+        use tokio::io::AsyncReadExt;
+        self.inner.read(buf).await.map_err(Error::Io)
+    }
+}
+
+impl TunWriter {
+    pub async fn send(&mut self, buf: &[u8]) -> Result<usize> {
+        use tokio::io::AsyncWriteExt;
+        self.inner.write(buf).await.map_err(Error::Io)
+    }
+}
+
 pub struct AsyncTunDevice {
-    device: AsyncDevice,
+    reader: TunReader,
+    writer: TunWriter,
     tun_name: String,
 }
 
@@ -47,20 +70,20 @@ impl AsyncTunDevice {
         let async_dev = AsyncDevice::new(device)
             .map_err(|e| Error::Io(std::io::Error::other(format!("TUN async: {e}"))))?;
 
+        let (writer, reader) = async_dev.split()
+            .map_err(|e| Error::Io(std::io::Error::other(format!("TUN split: {e}"))))?;
+
         tracing::info!(target: "seednet", name = %tun_name, ip = %config.overlay_addr, "TUN device created");
 
         Ok(Self {
-            device: async_dev,
+            reader: TunReader { inner: reader },
+            writer: TunWriter { inner: writer },
             tun_name,
         })
     }
 
-    pub async fn recv(&self, buf: &mut [u8]) -> Result<usize> {
-        self.device.recv(buf).await.map_err(Error::Io)
-    }
-
-    pub async fn send(&self, buf: &[u8]) -> Result<usize> {
-        self.device.send(buf).await.map_err(Error::Io)
+    pub fn into_split(self) -> (TunReader, TunWriter, String) {
+        (self.reader, self.writer, self.tun_name)
     }
 
     pub fn name(&self) -> &str {
