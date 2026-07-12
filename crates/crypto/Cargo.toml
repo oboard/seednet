@@ -1,0 +1,22 @@
+[package]
+name = "seednet-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Cryptography for SeedNet: seed derivation, keys, Noise"
+
+[dependencies]
+seednet-common = { workspace = true }
+
+hkdf = { workspace = true }
+sha1 = { workspace = true }
+blake3 = { workspace = true }
+sha2 = "0.11"
+ed25519-dalek = { workspace = true }
+x25519-dalek = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }

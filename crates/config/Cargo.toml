@@ -1,0 +1,16 @@
+[package]
+name = "seednet-config"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Identity persistence and state directory for SeedNet"
+
+[dependencies]
+seednet-common = { workspace = true }
+seednet-crypto = { workspace = true }
+serde = { workspace = true }
+postcard = { workspace = true }
+thiserror = { workspace = true }
+dirs = "6"

@@ -1,0 +1,182 @@
+//! CLI command implementations.
+//!
+//! For Milestone 1, `identity` is fully functional: it derives the network
+//! secret + infohash from the seed, loads (or creates) the per-device identity,
+//! and prints a human-readable summary. `up`/`down`/`status` are wired to the
+//! state directory and print informative messages; their full networking
+//! implementations arrive in later milestones.
+
+use anyhow::Result;
+use seednet_common::{Seed, INFOHASH_LEN};
+use seednet_config::StateDir;
+use seednet_crypto::{
+    derive_infohash, derive_network_secret, derive_overlay_addr, DeviceKeys,
+};
+
+/// Print the derived network identity for the given seed.
+pub async fn identity(state_dir: &StateDir, seed: &Seed) -> Result<()> {
+    let secret = derive_network_secret(seed);
+    let infohash = derive_infohash(&secret);
+    let keys: DeviceKeys = state_dir.load_or_create_identity()?;
+    let peer_id = keys.peer_id();
+    let overlay = derive_overlay_addr(&peer_id);
+
+    println!("SeedNet identity");
+    println!("──────────────────────────────────────────────────────────");
+    println!("State dir      : {}", state_dir.path().display());
+    println!("Network secret : {}", short_hex(secret.as_bytes(), 8));
+    println!(
+        "DHT infohash   : {}  ({} bytes)",
+        infohash,
+        INFOHASH_LEN
+    );
+    println!("This device    :");
+    println!("  PeerId (ed25519 pub) : {}", peer_id);
+    println!("  X25519 pub (noise)   : {}", short_hex(&keys.x25519_public_key(), 32));
+    println!("  Overlay IPv4         : {}", overlay);
+    println!("  Identity file        : {}", state_dir.identity_path().display());
+    println!("──────────────────────────────────────────────────────────");
+
+    Ok(())
+}
+
+/// Bring the network up.
+pub async fn up(state_dir: &StateDir, seed: &Seed, port: u16) -> Result<()> {
+    let secret = derive_network_secret(seed);
+    let infohash = derive_infohash(&secret);
+    let keys = state_dir.load_or_create_identity()?;
+    let peer_id = keys.peer_id();
+    let overlay = derive_overlay_addr(&peer_id);
+
+    tracing::info!(target: "seednet", "bringing network up (port {port})");
+    println!("SeedNet starting …");
+    println!("  infohash : {infohash}");
+    println!("  overlay  : {overlay} (this device)");
+    println!("  port     : {port}");
+    println!("  identity : {}", state_dir.identity_path().display());
+
+    // Persist our own PID so `down`/`status` can find us.
+    state_dir.write_pid(std::process::id())?;
+
+    // Milestone 1 stops here. Later milestones plug in the DHT announce loop,
+    // peer connection state machine, Noise handshake, TUN interface, and
+    // routing. We install a Ctrl-C handler so the PID file is cleaned up.
+    println!("Press Ctrl-C to stop (full networking arrives in later milestones).");
+    wait_for_signal().await;
+
+    println!("SeedNet shutting down …");
+    state_dir.clear_pid()?;
+    Ok(())
+}
+
+/// Bring the network down by signalling the running daemon via its PID file.
+pub async fn down(state_dir: &StateDir) -> Result<()> {
+    match state_dir.read_pid()? {
+        Some(pid) => {
+            println!("Stopping SeedNet (pid {pid}) …");
+            signal_pid(pid)?;
+            state_dir.clear_pid()?;
+            println!("Stopped.");
+        }
+        None => {
+            println!("SeedNet is not running (no PID file at {}).", state_dir.pid_path().display());
+        }
+    }
+    Ok(())
+}
+
+/// Print the current running status.
+pub async fn status(state_dir: &StateDir) -> Result<()> {
+    match state_dir.read_pid()? {
+        Some(pid) => {
+            let alive = process_alive(pid);
+            println!(
+                "SeedNet: {} (pid {pid})",
+                if alive { "running" } else { "stale PID" }
+            );
+            if !alive {
+                println!("  (stale PID file left behind; run `seednet down` to clean up)");
+            }
+            println!("  state dir : {}", state_dir.path().display());
+        }
+        None => {
+            println!("SeedNet: not running");
+            println!("  state dir : {}", state_dir.path().display());
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+fn short_hex(bytes: &[u8], take: usize) -> String {
+    let n = bytes.len().min(take);
+    let mut s = String::with_capacity(n * 2);
+    for b in &bytes[..n] {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+async fn wait_for_signal() {
+    // Ctrl-C on all platforms; SIGTERM on Unix.
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("install ctrl-c handler");
+    };
+
+    #[cfg(unix)]
+    let term = async {
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut s = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        s.recv().await;
+    };
+
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
+}
+
+fn signal_pid(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        // Send SIGTERM for a graceful shutdown.
+        let r = unsafe { libc_kill(pid, 15) };
+        if r != 0 {
+            anyhow::bail!("failed to signal pid {pid}: errno");
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        anyhow::bail!("sending signals is not supported on this platform");
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    #[link_name = "kill"]
+    fn libc_kill(pid: u32, sig: i32) -> i32;
+}
+
+fn process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        // signal 0 = "check existence": returns 0 if the process exists.
+        let r = unsafe { libc_kill(pid, 0) };
+        r == 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
+}

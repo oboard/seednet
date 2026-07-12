@@ -1,0 +1,22 @@
+[package]
+name = "seednet-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "SeedNet command-line interface"
+
+[[bin]]
+name = "seednet"
+path = "src/main.rs"
+
+[dependencies]
+seednet-common = { workspace = true }
+seednet-crypto = { workspace = true }
+seednet-config = { workspace = true }
+clap = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
