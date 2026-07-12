@@ -154,7 +154,7 @@ impl SeedNetEngine {
         let addr_to_peer: Arc<RwLock<HashMap<SocketAddr, PeerId>>> =
             Arc::new(RwLock::new(HashMap::new()));
 
-        let dht = DhtDiscovery::start(port)
+        let dht = DhtDiscovery::start_with(0, std::net::Ipv4Addr::UNSPECIFIED, &[])
             .map_err(|e| Error::Dht(format!("DHT start failed: {e}")))?;
 
         tracing::info!(target: "seednet", "Waiting for DHT bootstrap …");
