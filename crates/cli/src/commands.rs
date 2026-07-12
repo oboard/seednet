@@ -85,6 +85,102 @@ pub async fn down(state_dir: &StateDir) -> Result<()> {
     Ok(())
 }
 
+/// Run a DHT discovery cycle: announce self, lookup peers, print results.
+pub async fn discover(
+    seed: &Seed,
+    seednet_port: u16,
+    dht_port: Option<u16>,
+    duration_secs: u64,
+) -> Result<()> {
+    let secret = derive_network_secret(seed);
+    let infohash = derive_infohash(&secret);
+
+    println!("SeedNet discover");
+    println!("──────────────────────────────────────────────────────────");
+    println!("Infohash : {infohash}");
+    println!("Port     : {seednet_port}");
+
+    let bind_port = dht_port.unwrap_or(seednet_port);
+    let dht = seednet_dht::DhtDiscovery::start(bind_port)
+        .map_err(|e| anyhow::anyhow!("DHT start failed: {e}"))?;
+
+    println!("DHT port : {bind_port}");
+    println!("Bootstrap : default Mainline routers");
+    println!();
+
+    // Wait for the DHT to bootstrap.
+    println!("Bootstrapping …");
+    let bootstrapped = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        dht.bootstrapped(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("DHT bootstrap timed out (15s)"))?;
+
+    if bootstrapped {
+        println!("Bootstrapped successfully.");
+    } else {
+        println!("Warning: bootstrap returned false — DHT may not find peers.");
+    }
+
+    // Announce ourselves.
+    println!("Announcing on port {seednet_port} …");
+    dht.announce(&infohash, seednet_port)
+        .await
+        .map_err(|e| anyhow::anyhow!("announce failed: {e}"))?;
+    println!("Announced.");
+
+    // Run periodic lookups for the requested duration.
+    let mut all_peers: std::collections::HashSet<std::net::SocketAddr> =
+        std::collections::HashSet::new();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(duration_secs);
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+
+    println!("Looking up peers for {duration_secs}s …");
+    println!();
+
+    while tokio::time::Instant::now() < deadline {
+        interval.tick().await;
+        let remaining = deadline
+            .duration_since(tokio::time::Instant::now())
+            .as_secs();
+        tracing::info!(target: "seednet", "lookup cycle ({remaining}s remaining)");
+
+        match dht.lookup(&infohash).await {
+            Ok(peers) => {
+                let before = all_peers.len();
+                for p in &peers {
+                    all_peers.insert(*p);
+                }
+                let new_count = all_peers.len() - before;
+                println!(
+                    "  Lookup: {} peers in this batch ({} new, {} total unique)",
+                    peers.len(),
+                    new_count,
+                    all_peers.len()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(target: "seednet", "lookup error: {e}");
+                println!("  Lookup error: {e}");
+            }
+        }
+    }
+
+    println!();
+    println!("──────────────────────────────────────────────────────────");
+    println!("Discovery complete. {} unique peer(s) found:", all_peers.len());
+    for peer in &all_peers {
+        println!("  {peer}");
+    }
+    if all_peers.is_empty() {
+        println!("  (none — no other devices are currently online with this seed)");
+    }
+    println!("──────────────────────────────────────────────────────────");
+
+    Ok(())
+}
+
 /// Print the current running status.
 pub async fn status(state_dir: &StateDir) -> Result<()> {
     match state_dir.read_pid()? {

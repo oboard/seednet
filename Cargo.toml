@@ -4,6 +4,7 @@ members = [
     "crates/common",
     "crates/crypto",
     "crates/config",
+    "crates/dht",
     "crates/cli",
 ]
 
@@ -20,6 +21,7 @@ authors = ["SeedNet Contributors"]
 seednet-common = { path = "crates/common" }
 seednet-crypto = { path = "crates/crypto" }
 seednet-config = { path = "crates/config" }
+seednet-dht = { path = "crates/dht" }
 
 # Core async runtime
 tokio = { version = "1.52", features = ["full"] }
@@ -42,6 +44,9 @@ rand = "0.8"
 # Networking
 socket2 = "0.6"
 dashmap = "6.1"
+mainline = { version = "7.0", default-features = false, features = ["async"] }
+futures-lite = "2"
+futures = "0.3"
 
 # CLI / diagnostics
 clap = { version = "4.6", features = ["derive", "env"] }

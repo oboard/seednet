@@ -59,6 +59,21 @@ enum Command {
         /// The network seed (passphrase).
         seed: String,
     },
+    /// Join the DHT, announce this device, look up peers for the given seed,
+    /// print discovered peers, then exit.
+    Discover {
+        /// The network seed (passphrase).
+        seed: String,
+        /// UDP port for SeedNet traffic (default 4242).
+        #[arg(long, default_value_t = seednet_common::DEFAULT_PORT)]
+        port: u16,
+        /// DHT port (bind). Defaults to the SeedNet port.
+        #[arg(long)]
+        dht_port: Option<u16>,
+        /// How long to run the lookup before exiting (seconds, default 30).
+        #[arg(long, default_value_t = 30)]
+        duration: u64,
+    },
 }
 
 fn main() -> Result<()> {
@@ -89,6 +104,15 @@ fn main() -> Result<()> {
         Command::Up { seed, port } => {
             let seed = Seed::from_passphrase(&seed);
             rt.block_on(commands::up(&state_dir, &seed, port))?;
+        }
+        Command::Discover {
+            seed,
+            port,
+            dht_port,
+            duration,
+        } => {
+            let seed = Seed::from_passphrase(&seed);
+            rt.block_on(commands::discover(&seed, port, dht_port, duration))?;
         }
     }
 

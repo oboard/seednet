@@ -95,15 +95,18 @@ cargo run -- identity "other seed" --state-dir /tmp/sn2
 # → different infohash
 ```
 
-### Milestone 2 — DHT announce/lookup
+### Milestone 2 — DHT announce/lookup ✓
 
 ```sh
 cargo build --workspace
-cargo test --workspace
+cargo test --workspace          # 32 tests pass (includes local 2-node DHT discovery)
 
-# Two terminals, same seed:
-cargo run -- up "test net" --state-dir /tmp/sn-a --port 4242
-cargo run -- up "test net" --state-dir /tmp/sn-b --port 4243
+# Live DHT discovery (5s quick run):
+cargo run -- discover "correct horse battery staple" --duration 5 --state-dir /tmp/sn
+
+# Two terminals, same seed (discover each other):
+cargo run -- discover "test net" --duration 30 --state-dir /tmp/sn-a --port 4242
+cargo run -- discover "test net" --duration 30 --state-dir /tmp/sn-b --port 4243
 # → both announce the same infohash, discover each other
 ```
 

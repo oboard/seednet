@@ -15,6 +15,7 @@ path = "src/main.rs"
 seednet-common = { workspace = true }
 seednet-crypto = { workspace = true }
 seednet-config = { workspace = true }
+seednet-dht = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
