@@ -28,7 +28,9 @@ pub async fn configure_interface(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) ->
 
     #[cfg(target_os = "linux")]
     {
-        let ip_str = format!("{}/16", ip);
+        let prefix = seednet_common::OVERLAY_SUBNET_PREFIX;
+        let ip_str = format!("{}/{prefix}", ip);
+        let _ = netmask;
         let output = tokio::process::Command::new("ip")
             .args(["addr", "add", &ip_str, "dev", name])
             .output()

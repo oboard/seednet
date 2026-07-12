@@ -45,8 +45,8 @@ impl AsyncTunDevice {
 
         #[cfg(target_os = "linux")]
         {
-            tun_config.platform(|p| {
-                p.packet_information(false);
+            tun_config.platform_config(|p| {
+                p.ensure_root_privileges(false);
             });
         }
 
