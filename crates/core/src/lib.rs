@@ -130,19 +130,17 @@ impl SeedNetEngine {
         alloc_table.allocate(self.our_peer_id);
         drop(alloc_table);
 
-        let mut routing = self.routing_table.write().await;
-        routing.add_route(self.our_overlay, self.our_peer_id);
-        drop(routing);
-
         let tun_config = TunConfig::new(self.our_overlay);
         let tun_device = AsyncTunDevice::create(&tun_config)?;
         let tun_name = tun_device.name().to_string();
 
-        platform::configure_interface(
+        if let Err(e) = platform::configure_interface(
             &tun_name,
             self.our_overlay.ip(),
             subnet_mask(seednet_common::OVERLAY_SUBNET_PREFIX),
-        ).await.ok();
+        ).await {
+            tracing::warn!(target: "seednet", error = %e, "platform IP config failed (may need manual ifconfig/ip)");
+        }
 
         let udp_socket = UdpSocket::bind(format!("0.0.0.0:{port}")).await
             .map_err(Error::Io)?;
@@ -155,11 +153,6 @@ impl SeedNetEngine {
             Arc::new(RwLock::new(HashMap::new()));
         let addr_to_peer: Arc<RwLock<HashMap<SocketAddr, PeerId>>> =
             Arc::new(RwLock::new(HashMap::new()));
-
-        {
-            let mut rt = self.routing_table.write().await;
-            rt.add_route(self.our_overlay, self.our_peer_id);
-        }
 
         let dht = DhtDiscovery::start(port)
             .map_err(|e| Error::Dht(format!("DHT start failed: {e}")))?;
@@ -178,6 +171,7 @@ impl SeedNetEngine {
 
         let tun_dev = Arc::new(tokio::sync::Mutex::new(tun_device));
         let udp = Arc::new(udp_socket);
+        let our_peer_id_out = self.our_peer_id;
 
         let tun_out = tun_dev.clone();
         let router_out = self.routing_table.clone();
@@ -201,26 +195,31 @@ impl SeedNetEngine {
                             continue;
                         }
 
+                        let dst_ip = seednet_routing::parse_ipv4_packet(packet)
+                            .map(|p| p.dst_ip)
+                            .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED);
+
                         let rt = router_out.read().await;
-                        if let Some(peer_id) = rt.lookup(
-                            seednet_routing::parse_ipv4_packet(packet)
-                                .map(|p| p.dst_ip)
-                                .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED)
-                        ) {
+                        if let Some(peer_id) = rt.lookup(dst_ip) {
                             let peer_id = *peer_id;
-                            if peer_id != PeerId::from_bytes([0; 32]) {
-                                drop(rt);
-                                let mut ts = transports_out.write().await;
-                                if let Some(transport) = ts.get_mut(&peer_id)
-                                    && let Ok(encrypted) = transport.encrypt(packet)
-                                {
-                                    drop(ts);
-                                    let underlays = peer_underlays_out.read().await;
-                                    if let Some(addr) = underlays.get(&peer_id) {
-                                        let _ = udp_out.send_to(&encrypted, addr).await;
-                                    }
+                            if peer_id == our_peer_id_out {
+                                continue;
+                            }
+                            drop(rt);
+                            let mut ts = transports_out.write().await;
+                            if let Some(transport) = ts.get_mut(&peer_id)
+                                && let Ok(encrypted) = transport.encrypt(packet)
+                            {
+                                drop(ts);
+                                let underlays = peer_underlays_out.read().await;
+                                if let Some(addr) = underlays.get(&peer_id) {
+                                    let _ = udp_out.send_to(&encrypted, addr).await;
+                                } else {
+                                    tracing::debug!(target: "seednet", peer = %peer_id.short(), "no underlay addr for peer");
                                 }
                             }
+                        } else {
+                            tracing::trace!(target: "seednet", dst = %dst_ip, "no route for TUN packet");
                         }
                     }
                     Err(e) => {
