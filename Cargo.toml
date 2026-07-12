@@ -7,6 +7,7 @@ members = [
     "crates/dht",
     "crates/peer",
     "crates/tun",
+    "crates/overlay",
     "crates/cli",
 ]
 
@@ -26,6 +27,7 @@ seednet-config = { path = "crates/config" }
 seednet-dht = { path = "crates/dht" }
 seednet-peer = { path = "crates/peer" }
 seednet-tun = { path = "crates/tun" }
+seednet-overlay = { path = "crates/overlay" }
 
 # Core async runtime
 tokio = { version = "1.52", features = ["full"] }
