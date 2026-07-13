@@ -57,13 +57,6 @@ impl MessageChannel {
         self.outbound_tx.clone()
     }
 
-    pub fn receiver(&self) -> mpsc::Receiver<InboundMessage> {
-        // This is a bit awkward: we need to provide a way to get the receiver.
-        // The caller should take the receiver before starting the run loop.
-        // For now, we'll expose the rx via a separate method.
-        unimplemented!("take_receiver() must be called once before run()")
-    }
-
     pub fn take_receiver(&mut self) -> mpsc::Receiver<InboundMessage> {
         let (tx, rx) = mpsc::channel(INBOUND_BUF);
         self.inbound_tx = tx;
