@@ -24,6 +24,9 @@ pub const PID_FILENAME: &str = "seednet.pid";
 /// The filename holding a small JSON-ish status snapshot for `seednet status`.
 pub const STATUS_FILENAME: &str = "status.json";
 
+/// The filename holding the current connected-peers snapshot for `seednet list`.
+pub const PEERS_FILENAME: &str = "peers.json";
+
 /// Default per-user SeedNet state directory: `~/.seednet`.
 pub fn default_state_dir() -> Result<PathBuf> {
     let base = dirs::home_dir().ok_or_else(|| Error::IdentityMissing(PathBuf::from("$HOME")))?;
@@ -81,6 +84,11 @@ impl StateDir {
         self.path.join(STATUS_FILENAME)
     }
 
+    /// Path to the connected-peers snapshot written by the daemon.
+    pub fn peers_path(&self) -> PathBuf {
+        self.path.join(PEERS_FILENAME)
+    }
+
     /// Load the persisted identity, generating and persisting a fresh one on
     /// first run.
     pub fn load_or_create_identity(&self) -> Result<DeviceKeys> {
@@ -136,6 +144,29 @@ impl StateDir {
     /// Remove the PID file (e.g. on shutdown).
     pub fn clear_pid(&self) -> Result<()> {
         match fs::remove_file(self.pid_path()) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Write the connected-peers JSON snapshot atomically.
+    pub fn write_peers_json(&self, json: &str) -> Result<()> {
+        atomic_write(&self.peers_path(), json.as_bytes(), 0o644)
+    }
+
+    /// Read the peers snapshot, returning `None` if absent.
+    pub fn read_peers_json(&self) -> Result<Option<String>> {
+        match fs::read_to_string(self.peers_path()) {
+            Ok(s) => Ok(Some(s)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Remove the peers snapshot (e.g. on daemon shutdown).
+    pub fn clear_peers_json(&self) -> Result<()> {
+        match fs::remove_file(self.peers_path()) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e.into()),

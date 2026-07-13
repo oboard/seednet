@@ -11,6 +11,7 @@ description = "Identity persistence and state directory for SeedNet"
 seednet-common = { workspace = true }
 seednet-crypto = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
 dirs = "6"

@@ -634,31 +634,58 @@ impl SeedNetEngine {
             }
         });
 
-        // Subscribe to peer events and print human-readable peer state changes
-        // to stdout so the user can see who joins/leaves the VPN without -v.
+        // Subscribe to peer events and write a peers.json snapshot on every
+        // connect/disconnect so that `seednet list` always sees current data.
         let mut peer_events = self.peer_manager.subscribe();
         let routing_table_evt = self.routing_table.clone();
-        let peer_event_handle = tokio::spawn(async move {
+        let peer_mgr_evt = self.peer_manager.clone();
+        let state_dir_evt = self.config.state_dir.clone();
+
+        let peers_file_handle = tokio::spawn(async move {
+            // Write an initial empty snapshot so list shows "no peers" rather
+            // than stale data from a previous run.
+            let _ = state_dir_evt.write_peers_json(r#"{"peers":[]}"#);
+
             loop {
                 match peer_events.recv().await {
                     Ok(PeerEvent::StateChanged {
-                        id,
                         to: PeerState::Connected,
                         ..
-                    }) => {
-                        let overlay_ip = {
-                            let rt = routing_table_evt.read().await;
-                            rt.lookup_peer_ip(&id)
-                        };
-                        match overlay_ip {
-                            Some(ip) => {
-                                println!("  [+] peer connected  : {} (overlay {})", id.short(), ip)
-                            }
-                            None => println!("  [+] peer connected  : {}", id.short()),
+                    })
+                    | Ok(PeerEvent::Removed { .. }) => {
+                        // Rebuild snapshot on every significant state change.
+                        let connected = peer_mgr_evt.connected_peers().await;
+                        let rt = routing_table_evt.read().await;
+
+                        let mut entries = Vec::with_capacity(connected.len());
+                        for id in &connected {
+                            let overlay = rt
+                                .lookup_peer_ip(id)
+                                .map(|ip| ip.to_string())
+                                .unwrap_or_default();
+                            let underlay = if let Some(peer) = peer_mgr_evt.get(id) {
+                                peer.underlay_addr()
+                                    .await
+                                    .map(|a| a.to_string())
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
+                            entries.push(format!(
+                                concat!(
+                                    r#"{{"id":"{id}","id_short":"{short}","#,
+                                    r#""overlay":"{overlay}","underlay":"{underlay}"}}"#,
+                                ),
+                                id = id,
+                                short = id.short(),
+                                overlay = overlay,
+                                underlay = underlay,
+                            ));
                         }
-                    }
-                    Ok(PeerEvent::Removed { id }) => {
-                        println!("  [-] peer disconnected: {}", id.short());
+                        drop(rt);
+
+                        let json = format!(r#"{{"peers":[{}]}}"#, entries.join(","));
+                        let _ = state_dir_evt.write_peers_json(&json);
                     }
                     Ok(_) => {}
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -680,7 +707,9 @@ impl SeedNetEngine {
         discovery_handle.abort();
         announce_handle.abort();
         heartbeat_handle.abort();
-        peer_event_handle.abort();
+        peers_file_handle.abort();
+        // Clear the peers snapshot so stale data is not visible after restart.
+        let _ = self.config.state_dir.clear_peers_json();
 
         Ok(())
     }

@@ -1,13 +1,14 @@
 //! `seednet` — command-line entry point.
 //!
-//! Milestone 1 implements:
-//! * `seednet up <SEED>` — bring the network up (stubbed for now; full
-//!   wiring arrives in later milestones).
-//! * `seednet down` — bring the network down.
-//! * `seednet status` — show running state.
-//! * `seednet identity <SEED>` — print the derived network identity
-//!   (infohash, this device's PeerId and overlay address) without joining
-//!   the network.
+//! * `seednet up <SEED>` — launch the overlay as a background daemon.
+//! * `seednet down` — stop the running daemon.
+//! * `seednet list` — list connected peers.
+//! * `seednet status` — show running/stopped state.
+//! * `seednet identity <SEED>` — print the derived network identity without
+//!   joining the network.
+//! * `seednet discover <SEED>` — one-shot DHT peer discovery.
+//! * `seednet _daemon <SEED>` — internal: run the engine in the foreground
+//!   (hidden from help; invoked by `up`).
 
 mod commands;
 mod logging;
@@ -40,7 +41,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Bring the overlay network up and keep it running in the foreground.
+    /// Bring the overlay network up and run it in the background.
     Up {
         /// The network seed (passphrase). Every device with the same seed
         /// joins the same network.
@@ -49,8 +50,10 @@ enum Command {
         #[arg(long, default_value_t = seednet_common::DEFAULT_PORT)]
         port: u16,
     },
-    /// Bring the overlay network down (stops a running `up` daemon).
+    /// Bring the overlay network down (stops the running daemon).
     Down,
+    /// List connected peers in the overlay network.
+    List,
     /// Print the current running status.
     Status,
     /// Derive and print the network identity for the given seed, then exit.
@@ -73,6 +76,16 @@ enum Command {
         /// How long to run the lookup before exiting (seconds, default 30).
         #[arg(long, default_value_t = 30)]
         duration: u64,
+    },
+    /// Internal: run the engine in the foreground as the background daemon.
+    /// Invoked automatically by `seednet up`; not shown in help.
+    #[command(hide = true, name = "_daemon")]
+    Daemon {
+        /// The network seed (passphrase).
+        seed: String,
+        /// UDP port to listen on.
+        #[arg(long, default_value_t = seednet_common::DEFAULT_PORT)]
+        port: u16,
     },
 }
 
@@ -102,8 +115,17 @@ fn main() -> Result<()> {
             rt.block_on(commands::down(&state_dir))?;
         }
         Command::Up { seed, port } => {
+            let state_dir_path = cli.state_dir;
             let seed = Seed::from_passphrase(&seed);
-            rt.block_on(commands::up(&state_dir, &seed, port))?;
+            rt.block_on(commands::up(
+                &state_dir,
+                &seed,
+                port,
+                state_dir_path.as_deref(),
+            ))?;
+        }
+        Command::List => {
+            rt.block_on(commands::list(&state_dir))?;
         }
         Command::Discover {
             seed,
@@ -113,6 +135,10 @@ fn main() -> Result<()> {
         } => {
             let seed = Seed::from_passphrase(&seed);
             rt.block_on(commands::discover(&seed, port, dht_port, duration))?;
+        }
+        Command::Daemon { seed, port } => {
+            let seed = Seed::from_passphrase(&seed);
+            rt.block_on(commands::daemon(&state_dir, &seed, port))?;
         }
     }
 
