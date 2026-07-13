@@ -12,7 +12,7 @@ use seednet_crypto::{
 };
 use seednet_dht::DhtDiscovery;
 use seednet_overlay::AllocationTable;
-use seednet_peer::{Message, PeerManager, PeerState};
+use seednet_peer::{Message, PeerEvent, PeerManager, PeerState};
 use seednet_routing::RoutingTable;
 use seednet_tun::subnet_mask;
 use seednet_tun::{AsyncTunDevice, TunConfig, platform};
@@ -634,6 +634,41 @@ impl SeedNetEngine {
             }
         });
 
+        // Subscribe to peer events and print human-readable peer state changes
+        // to stdout so the user can see who joins/leaves the VPN without -v.
+        let mut peer_events = self.peer_manager.subscribe();
+        let routing_table_evt = self.routing_table.clone();
+        let peer_event_handle = tokio::spawn(async move {
+            loop {
+                match peer_events.recv().await {
+                    Ok(PeerEvent::StateChanged {
+                        id,
+                        to: PeerState::Connected,
+                        ..
+                    }) => {
+                        let overlay_ip = {
+                            let rt = routing_table_evt.read().await;
+                            rt.lookup_peer_ip(&id)
+                        };
+                        match overlay_ip {
+                            Some(ip) => {
+                                println!("  [+] peer connected  : {} (overlay {})", id.short(), ip)
+                            }
+                            None => println!("  [+] peer connected  : {}", id.short()),
+                        }
+                    }
+                    Ok(PeerEvent::Removed { id }) => {
+                        println!("  [-] peer disconnected: {}", id.short());
+                    }
+                    Ok(_) => {}
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(target: "seednet", skipped = n, "peer event channel lagged");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
         let ctrl_c = tokio::signal::ctrl_c();
         ctrl_c
             .await
@@ -645,6 +680,7 @@ impl SeedNetEngine {
         discovery_handle.abort();
         announce_handle.abort();
         heartbeat_handle.abort();
+        peer_event_handle.abort();
 
         Ok(())
     }
