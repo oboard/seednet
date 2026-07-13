@@ -3,11 +3,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use seednet_common::{Error, InfoHash, NetworkSecret, OVERLAY_MTU, OverlayAddr, PeerId, Seed};
 use seednet_config::StateDir;
 use seednet_crypto::{
-    DeviceKeys, InitiatorHandshake, ResponderHandshake, derive_infohash, derive_network_secret,
-    derive_overlay_addr,
+    DeviceKeys, InitiatorHandshake, ResponderHandshake, SecureTransport, derive_infohash,
+    derive_network_secret, derive_overlay_addr,
 };
 use seednet_dht::DhtDiscovery;
 use seednet_overlay::AllocationTable;
@@ -27,6 +28,17 @@ const MAX_DATAGRAM: usize = OVERLAY_MTU + 256;
 
 const NOISE_HANDSHAKE_INITIATOR_PREFIX: &[u8] = b"seednet-hs-a";
 const NOISE_HANDSHAKE_RESPONDER_PREFIX: &[u8] = b"seednet-hs-b";
+
+/// Combined per-peer session state: Noise transport + underlay address.
+///
+/// Replaces three separate `RwLock<HashMap<...>>` (`transports`, `peer_underlays`,
+/// `addr_to_peer`) with a single `DashMap<PeerId, PeerSession>` plus a thin
+/// reverse-index `DashMap<SocketAddr, PeerId>`. All fields that belong to one
+/// peer are now co-located, eliminating multi-lock acquisition sequences.
+struct PeerSession {
+    transport: SecureTransport,
+    underlay: SocketAddr,
+}
 
 pub struct SeedNetConfig {
     pub seed: Seed,
@@ -154,12 +166,11 @@ impl SeedNetEngine {
             .map_err(Error::Io)?;
         tracing::info!(target: "seednet", port, "UDP data socket bound");
 
-        let transports: Arc<RwLock<HashMap<PeerId, seednet_crypto::SecureTransport>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-        let peer_underlays: Arc<RwLock<HashMap<PeerId, SocketAddr>>> =
-            Arc::new(RwLock::new(HashMap::new()));
-        let addr_to_peer: Arc<RwLock<HashMap<SocketAddr, PeerId>>> =
-            Arc::new(RwLock::new(HashMap::new()));
+        // Single DashMap keyed by PeerId; eliminates three separate RwLock<HashMap>
+        // and the multi-lock acquisition patterns they required.
+        let sessions: Arc<DashMap<PeerId, PeerSession>> = Arc::new(DashMap::new());
+        // Reverse index: SocketAddr → PeerId, for O(1) inbound dispatch.
+        let addr_index: Arc<DashMap<SocketAddr, PeerId>> = Arc::new(DashMap::new());
         let pending_handshakes: Arc<
             RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>,
         > = Arc::new(RwLock::new(HashMap::new()));
@@ -186,8 +197,7 @@ impl SeedNetEngine {
         let udp = Arc::new(udp_socket);
 
         let router_out = self.routing_table.clone();
-        let transports_out = transports.clone();
-        let peer_underlays_out = peer_underlays.clone();
+        let sessions_out = sessions.clone();
         let udp_out = udp.clone();
         let our_overlay_out = self.our_overlay;
         let tun_writer_out = tun_writer.clone();
@@ -217,17 +227,19 @@ impl SeedNetEngine {
                         if let Some(peer_id) = rt.lookup(dst_ip) {
                             let peer_id = *peer_id;
                             drop(rt);
-                            let mut ts = transports_out.write().await;
-                            if let Some(transport) = ts.get_mut(&peer_id)
-                                && let Ok(encrypted) = transport.encrypt(packet)
-                            {
-                                drop(ts);
-                                let underlays = peer_underlays_out.read().await;
-                                if let Some(addr) = underlays.get(&peer_id) {
-                                    let _ = udp_out.send_to(&encrypted, addr).await;
-                                } else {
-                                    tracing::debug!(target: "seednet", peer = %peer_id.short(), "no underlay addr for peer");
+                            if let Some(mut session) = sessions_out.get_mut(&peer_id) {
+                                match session.transport.encrypt(packet) {
+                                    Ok(encrypted) => {
+                                        let addr = session.underlay;
+                                        drop(session);
+                                        let _ = udp_out.send_to(&encrypted, addr).await;
+                                    }
+                                    Err(e) => {
+                                        tracing::debug!(target: "seednet", peer = %peer_id.short(), error = %e, "encrypt failed");
+                                    }
                                 }
+                            } else {
+                                tracing::debug!(target: "seednet", peer = %peer_id.short(), "no session for peer");
                             }
                         } else {
                             tracing::trace!(target: "seednet", dst = %dst_ip, "no route for TUN packet");
@@ -243,9 +255,8 @@ impl SeedNetEngine {
 
         let tun_writer_in = tun_writer.clone();
         let udp_in = udp.clone();
-        let transports_in = transports.clone();
-        let addr_to_peer_in = addr_to_peer.clone();
-        let peer_underlays_in = peer_underlays.clone();
+        let sessions_in = sessions.clone();
+        let addr_index_in = addr_index.clone();
         let pending_in = pending_handshakes.clone();
         let network_secret_resp = self.network_secret;
         let device_keys_resp = self.device_keys.clone();
@@ -258,8 +269,10 @@ impl SeedNetEngine {
             // Keyed by peer SocketAddr; value is the half-completed ResponderHandshake
             // (after msg A read + msg B sent) waiting for msg C. Entries older than
             // HANDSHAKE_TIMEOUT are evicted on the next incoming packet.
-            let mut pending_responders: HashMap<SocketAddr, (ResponderHandshake, std::time::Instant)> =
-                HashMap::new();
+            let mut pending_responders: HashMap<
+                SocketAddr,
+                (ResponderHandshake, std::time::Instant),
+            > = HashMap::new();
 
             loop {
                 match udp_in.recv_from(&mut buf).await {
@@ -267,8 +280,7 @@ impl SeedNetEngine {
                         let data = buf[..n].to_vec();
 
                         // Evict stale half-open responder handshakes.
-                        pending_responders
-                            .retain(|_, (_, t)| t.elapsed() < HANDSHAKE_TIMEOUT);
+                        pending_responders.retain(|_, (_, t)| t.elapsed() < HANDSHAKE_TIMEOUT);
 
                         // --- msg B dispatch: initiator side waiting on a oneshot ---
                         if data.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
@@ -299,17 +311,14 @@ impl SeedNetEngine {
                                         "handshake completed (responder)"
                                     );
 
-                                    let mut ts = transports_in.write().await;
-                                    ts.insert(peer_id, resp_result.transport);
-                                    drop(ts);
-
-                                    let mut a2p = addr_to_peer_in.write().await;
-                                    a2p.insert(from, peer_id);
-                                    drop(a2p);
-
-                                    let mut pu_w = peer_underlays_in.write().await;
-                                    pu_w.insert(peer_id, from);
-                                    drop(pu_w);
+                                    sessions_in.insert(
+                                        peer_id,
+                                        PeerSession {
+                                            transport: resp_result.transport,
+                                            underlay: from,
+                                        },
+                                    );
+                                    addr_index_in.insert(from, peer_id);
 
                                     let overlay = derive_overlay_addr(&peer_id);
                                     let mut rt = routing_table_in.write().await;
@@ -343,37 +352,37 @@ impl SeedNetEngine {
                         }
 
                         // --- data from an established peer ---
-                        let a2p = addr_to_peer_in.read().await;
-                        if let Some(peer_id) = a2p.get(&from) {
-                            let peer_id = *peer_id;
-                            drop(a2p);
-
-                            let mut ts = transports_in.write().await;
-                            if let Some(transport) = ts.get_mut(&peer_id)
-                                && let Ok(decrypted) = transport.decrypt(&data)
-                            {
-                                drop(ts);
-                                match seednet_peer::message::deserialize_message(&decrypted) {
-                                    Ok(Message::Heartbeat) => {
-                                        tracing::trace!(target: "seednet", from = %from, "heartbeat received");
-                                    }
-                                    Ok(Message::Data(payload)) => {
-                                        let mut writer = tun_writer_in.lock().await;
-                                        let _ = writer.send(&payload).await;
-                                    }
-                                    Ok(msg) => {
-                                        tracing::debug!(target: "seednet", from = %from, ?msg, "unhandled message type");
+                        if let Some(peer_id) = addr_index_in.get(&from).map(|r| *r) {
+                            if let Some(mut session) = sessions_in.get_mut(&peer_id) {
+                                match session.transport.decrypt(&data) {
+                                    Ok(decrypted) => {
+                                        drop(session);
+                                        match seednet_peer::message::deserialize_message(&decrypted)
+                                        {
+                                            Ok(Message::Heartbeat) => {
+                                                tracing::trace!(target: "seednet", from = %from, "heartbeat received");
+                                            }
+                                            Ok(Message::Data(payload)) => {
+                                                let mut writer = tun_writer_in.lock().await;
+                                                let _ = writer.send(&payload).await;
+                                            }
+                                            Ok(msg) => {
+                                                tracing::debug!(target: "seednet", from = %from, ?msg, "unhandled message type");
+                                            }
+                                            Err(_) => {
+                                                // Legacy: raw IPv4 packet not wrapped in Message.
+                                                let mut writer = tun_writer_in.lock().await;
+                                                let _ = writer.send(&decrypted).await;
+                                            }
+                                        }
                                     }
                                     Err(_) => {
-                                        // Legacy: raw IPv4 packet not wrapped in Message.
-                                        let mut writer = tun_writer_in.lock().await;
-                                        let _ = writer.send(&decrypted).await;
+                                        tracing::debug!(target: "seednet", from = %from, "decrypt failed for established peer");
                                     }
                                 }
                             }
                             continue;
                         }
-                        drop(a2p);
 
                         // --- msg A: start responder handshake, send msg B, park state ---
                         if data.starts_with(NOISE_HANDSHAKE_INITIATOR_PREFIX) {
@@ -423,9 +432,8 @@ impl SeedNetEngine {
         let network_secret_dht = self.network_secret;
         let device_keys_dht = self.device_keys.clone();
         let udp_dht = udp.clone();
-        let transports_dht = transports.clone();
-        let addr_to_peer_dht = addr_to_peer.clone();
-        let peer_underlays_dht = peer_underlays.clone();
+        let sessions_dht = sessions.clone();
+        let addr_index_dht = addr_index.clone();
         let pending_dht = pending_handshakes.clone();
         let routing_table_dht = self.routing_table.clone();
         let our_peer_id_dht = self.our_peer_id;
@@ -441,9 +449,7 @@ impl SeedNetEngine {
                         tracing::info!(target: "seednet", count = peers.len(), "DHT lookup completed");
 
                         for addr in peers {
-                            let a2p = addr_to_peer_dht.read().await;
-                            let already_known = a2p.contains_key(&addr);
-                            drop(a2p);
+                            let already_known = addr_index_dht.contains_key(&addr);
 
                             if already_known {
                                 tracing::debug!(target: "seednet", addr = %addr, "peer already connected, skipping");
@@ -533,17 +539,14 @@ impl SeedNetEngine {
                                         "handshake completed (initiator)"
                                     );
 
-                                    let mut ts = transports_dht.write().await;
-                                    ts.insert(peer_id, init_result.transport);
-                                    drop(ts);
-
-                                    let mut a2p = addr_to_peer_dht.write().await;
-                                    a2p.insert(addr, peer_id);
-                                    drop(a2p);
-
-                                    let mut pu = peer_underlays_dht.write().await;
-                                    pu.insert(peer_id, addr);
-                                    drop(pu);
+                                    sessions_dht.insert(
+                                        peer_id,
+                                        PeerSession {
+                                            transport: init_result.transport,
+                                            underlay: addr,
+                                        },
+                                    );
+                                    addr_index_dht.insert(addr, peer_id);
 
                                     let overlay = derive_overlay_addr(&peer_id);
                                     let mut rt = routing_table_dht.write().await;
@@ -602,26 +605,21 @@ impl SeedNetEngine {
         });
 
         let udp_hb = udp.clone();
-        let transports_hb = transports.clone();
-        let peer_underlays_hb = peer_underlays.clone();
+        let sessions_hb = sessions.clone();
 
         let heartbeat_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
-            let heartbeat_payload =
-                seednet_peer::message::serialize_message(&Message::Heartbeat);
+            let heartbeat_payload = seednet_peer::message::serialize_message(&Message::Heartbeat);
             loop {
                 interval.tick().await;
-                let mut ts = transports_hb.write().await;
-                let pu = peer_underlays_hb.read().await;
-                for (peer_id, transport) in ts.iter_mut() {
-                    if let Some(addr) = pu.get(peer_id) {
-                        match transport.encrypt(&heartbeat_payload) {
-                            Ok(encrypted) => {
-                                let _ = udp_hb.send_to(&encrypted, addr).await;
-                            }
-                            Err(e) => {
-                                tracing::debug!(target: "seednet", peer = %peer_id.short(), error = %e, "heartbeat encrypt failed");
-                            }
+                for mut entry in sessions_hb.iter_mut() {
+                    let addr = entry.underlay;
+                    match entry.transport.encrypt(&heartbeat_payload) {
+                        Ok(encrypted) => {
+                            let _ = udp_hb.send_to(&encrypted, addr).await;
+                        }
+                        Err(e) => {
+                            tracing::debug!(target: "seednet", peer = %entry.key().short(), error = %e, "heartbeat encrypt failed");
                         }
                     }
                 }
