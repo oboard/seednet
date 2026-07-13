@@ -27,6 +27,9 @@ pub const STATUS_FILENAME: &str = "status.json";
 /// The filename holding the current connected-peers snapshot for `seednet list`.
 pub const PEERS_FILENAME: &str = "peers.json";
 
+/// The filename holding daemon stderr output (useful for post-mortem on crash).
+pub const LOG_FILENAME: &str = "seednet.log";
+
 /// Default per-user SeedNet state directory: `~/.seednet`.
 pub fn default_state_dir() -> Result<PathBuf> {
     let base = dirs::home_dir().ok_or_else(|| Error::IdentityMissing(PathBuf::from("$HOME")))?;
@@ -87,6 +90,11 @@ impl StateDir {
     /// Path to the connected-peers snapshot written by the daemon.
     pub fn peers_path(&self) -> PathBuf {
         self.path.join(PEERS_FILENAME)
+    }
+
+    /// Path to the daemon log file (stderr redirect).
+    pub fn log_path(&self) -> PathBuf {
+        self.path.join(LOG_FILENAME)
     }
 
     /// Load the persisted identity, generating and persisting a fresh one on

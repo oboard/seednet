@@ -36,6 +36,13 @@ pub async fn up(
     let exe = std::env::current_exe().context("could not determine current executable")?;
     let seed_str = String::from_utf8_lossy(seed.as_bytes()).into_owned();
 
+    let log_path = state_dir.log_path();
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .context("could not open daemon log file")?;
+
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("_daemon")
         .arg(&seed_str)
@@ -47,10 +54,11 @@ pub async fn up(
         cmd.arg("--state-dir").arg(dir);
     }
 
-    // Detach from the parent's stdio so the shell doesn't wait.
+    // Detach stdin; redirect stdout+stderr to the log file so errors are
+    // captured and can be shown to the user if startup fails.
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(log_file);
 
     // On Unix: put the daemon in its own process group so it is not killed
     // when the user's shell session ends.
@@ -60,18 +68,50 @@ pub async fn up(
         cmd.process_group(0);
     }
 
-    cmd.spawn().context("failed to launch SeedNet daemon")?;
+    let mut child = cmd.spawn().context("failed to launch SeedNet daemon")?;
 
     // Wait up to 5 s for the daemon to write its PID file.
+    // If the child process exits before writing the PID we know it crashed.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(100));
-        if state_dir.read_pid()?.is_some() {
-            break;
+        // Non-blocking check: did the daemon already die?
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Daemon exited before writing PID — it crashed.
+                let log_tail = read_log_tail(&log_path, 20);
+                anyhow::bail!(
+                    "SeedNet daemon exited immediately ({})\n\
+                     Log ({}):\n{}",
+                    status,
+                    log_path.display(),
+                    log_tail,
+                );
+            }
+            Ok(None) => {} // still running
+            Err(_) => {}   // can't check; proceed
         }
+
+        if let Some(pid) = state_dir.read_pid()? {
+            if process_alive(pid) {
+                break; // daemon is up and healthy
+            }
+            // PID was written but process already exited — it crashed right
+            // after writing the PID file.  Fall through so we pick up the
+            // child.try_wait() path on the next tick.
+        }
+
         if std::time::Instant::now() > deadline {
-            anyhow::bail!("daemon did not start within 5 s — check logs with `seednet -v up`");
+            let _ = child.kill();
+            let log_tail = read_log_tail(&log_path, 20);
+            anyhow::bail!(
+                "daemon did not start within 5 s\n\
+                 Log ({}):\n{}",
+                log_path.display(),
+                log_tail,
+            );
         }
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
     let pid = state_dir.read_pid()?.unwrap_or(0);
@@ -83,6 +123,7 @@ pub async fn up(
     println!("SeedNet started  (pid {pid})");
     println!("  overlay : {overlay}  (this device)");
     println!("  port    : {port}");
+    println!("  log     : {}", log_path.display());
     println!();
     println!("  seednet list   — show connected peers");
     println!("  seednet down   — stop");
@@ -103,12 +144,15 @@ pub async fn daemon(state_dir: &StateDir, seed: &Seed, port: u16) -> Result<()> 
     // Write PID *before* starting network I/O so that `up` can detect us.
     state_dir.write_pid(std::process::id())?;
 
-    if let Err(e) = engine.run().await {
-        tracing::error!(target: "seednet", error = %e, "engine error");
-    }
+    let result = engine.run().await;
 
     state_dir.clear_pid()?;
     state_dir.clear_peers_json()?;
+
+    // Propagate engine errors — this causes a non-zero exit code and writes
+    // the error message to stderr (which `up` redirects to seednet.log).
+    result.map_err(|e| anyhow::anyhow!("engine error: {e}"))?;
+
     Ok(())
 }
 
@@ -133,9 +177,19 @@ pub async fn down(state_dir: &StateDir) -> Result<()> {
             println!("SeedNet has a stale PID file (pid {pid}); cleaning up.");
             let _ = state_dir.clear_pid();
             let _ = state_dir.clear_peers_json();
+            // Also try to kill any orphaned daemon processes.
+            kill_orphaned_daemons();
         }
         None => {
-            println!("SeedNet is not running.");
+            // No PID file — look for orphaned daemon processes by name.
+            let killed = kill_orphaned_daemons();
+            if killed > 0 {
+                let _ = state_dir.clear_pid();
+                let _ = state_dir.clear_peers_json();
+                println!("Stopped {killed} orphaned SeedNet daemon(s).");
+            } else {
+                println!("SeedNet is not running.");
+            }
         }
     }
     Ok(())
@@ -362,6 +416,52 @@ pub async fn discover(
 // ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
+
+/// Read the last `n` lines from a file for error reporting.
+fn read_log_tail(path: &std::path::Path, n: usize) -> String {
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return "(log not available)".to_string(),
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(n);
+    lines[start..].join("\n")
+}
+
+/// Find and SIGTERM any orphaned `seednet _daemon` processes.
+/// Returns the number of processes signalled.
+/// On non-Unix this is a no-op.
+fn kill_orphaned_daemons() -> usize {
+    #[cfg(unix)]
+    {
+        // `pgrep -f "seednet _daemon"` finds processes by full command line.
+        let output = std::process::Command::new("pgrep")
+            .args(["-f", "seednet _daemon"])
+            .output();
+
+        let pids: Vec<u32> = match output {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                // Skip ourselves.
+                .filter(|&p| p != std::process::id())
+                .collect(),
+            _ => return 0,
+        };
+
+        let mut killed = 0;
+        for pid in pids {
+            if signal_pid(pid).is_ok() {
+                killed += 1;
+            }
+        }
+        killed
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
 
 fn short_hex(bytes: &[u8], take: usize) -> String {
     let n = bytes.len().min(take);
