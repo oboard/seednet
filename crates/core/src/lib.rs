@@ -480,9 +480,17 @@ impl SeedNetEngine {
                             let mut tagged_a = NOISE_HANDSHAKE_INITIATOR_PREFIX.to_vec();
                             tagged_a.extend_from_slice(&msg_a);
 
+                            // Insert the oneshot sender BEFORE send_to so the inbound
+                            // task can never receive msg B and look up a missing entry.
+                            // On send failure the entry is removed before continuing.
+                            // Also skip if a handshake is already in-flight for this addr.
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             {
                                 let mut pending = pending_dht.write().await;
+                                if pending.contains_key(&addr) {
+                                    tracing::debug!(target: "seednet", addr = %addr, "handshake already in flight, skipping");
+                                    continue;
+                                }
                                 pending.insert(addr, tx);
                             }
 
