@@ -11,7 +11,7 @@ use seednet_crypto::{
 };
 use seednet_dht::DhtDiscovery;
 use seednet_overlay::AllocationTable;
-use seednet_peer::{PeerManager, PeerState};
+use seednet_peer::{Message, PeerManager, PeerState};
 use seednet_routing::RoutingTable;
 use seednet_tun::subnet_mask;
 use seednet_tun::{AsyncTunDevice, TunConfig, platform};
@@ -259,11 +259,6 @@ impl SeedNetEngine {
                     Ok((n, from)) => {
                         let data = &buf[..n];
 
-                        if data == b"seednet-heartbeat" {
-                            tracing::trace!(target: "seednet", from = %from, "heartbeat received");
-                            continue;
-                        }
-
                         if data.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
                             let mut pending = pending_in.write().await;
                             if let Some(sender) = pending.remove(&from) {
@@ -285,8 +280,23 @@ impl SeedNetEngine {
                                 && let Ok(decrypted) = transport.decrypt(data)
                             {
                                 drop(ts);
-                                let mut writer = tun_writer_in.lock().await;
-                                let _ = writer.send(&decrypted).await;
+                                match seednet_peer::message::deserialize_message(&decrypted) {
+                                    Ok(Message::Heartbeat) => {
+                                        tracing::trace!(target: "seednet", from = %from, "heartbeat received");
+                                    }
+                                    Ok(Message::Data(payload)) => {
+                                        let mut writer = tun_writer_in.lock().await;
+                                        let _ = writer.send(&payload).await;
+                                    }
+                                    Ok(msg) => {
+                                        tracing::debug!(target: "seednet", from = %from, ?msg, "unhandled message type");
+                                    }
+                                    Err(_) => {
+                                        // legacy: raw IPv4 packet not wrapped in Message
+                                        let mut writer = tun_writer_in.lock().await;
+                                        let _ = writer.send(&decrypted).await;
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -591,13 +601,22 @@ impl SeedNetEngine {
 
         let heartbeat_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(HEARTBEAT_INTERVAL);
+            let heartbeat_payload =
+                seednet_peer::message::serialize_message(&Message::Heartbeat);
             loop {
                 interval.tick().await;
-                let ts = transports_hb.read().await;
+                let mut ts = transports_hb.write().await;
                 let pu = peer_underlays_hb.read().await;
-                for (peer_id, _transport) in ts.iter() {
+                for (peer_id, transport) in ts.iter_mut() {
                     if let Some(addr) = pu.get(peer_id) {
-                        let _ = udp_hb.send_to(b"seednet-heartbeat", addr).await;
+                        match transport.encrypt(&heartbeat_payload) {
+                            Ok(encrypted) => {
+                                let _ = udp_hb.send_to(&encrypted, addr).await;
+                            }
+                            Err(e) => {
+                                tracing::debug!(target: "seednet", peer = %peer_id.short(), error = %e, "heartbeat encrypt failed");
+                            }
+                        }
                     }
                 }
             }
