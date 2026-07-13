@@ -254,22 +254,95 @@ impl SeedNetEngine {
 
         let inbound_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_DATAGRAM];
+            // State machine for concurrent responder-side handshakes.
+            // Keyed by peer SocketAddr; value is the half-completed ResponderHandshake
+            // (after msg A read + msg B sent) waiting for msg C. Entries older than
+            // HANDSHAKE_TIMEOUT are evicted on the next incoming packet.
+            let mut pending_responders: HashMap<SocketAddr, (ResponderHandshake, std::time::Instant)> =
+                HashMap::new();
+
             loop {
                 match udp_in.recv_from(&mut buf).await {
                     Ok((n, from)) => {
-                        let data = &buf[..n];
+                        let data = buf[..n].to_vec();
 
+                        // Evict stale half-open responder handshakes.
+                        pending_responders
+                            .retain(|_, (_, t)| t.elapsed() < HANDSHAKE_TIMEOUT);
+
+                        // --- msg B dispatch: initiator side waiting on a oneshot ---
                         if data.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
                             let mut pending = pending_in.write().await;
                             if let Some(sender) = pending.remove(&from) {
                                 drop(pending);
                                 tracing::debug!(target: "seednet", from = %from, "dispatching msg B to pending initiator");
-                                let _ = sender.send(data.to_vec());
+                                let _ = sender.send(data);
                                 continue;
                             }
                             drop(pending);
+                            // Not for us — fall through to other handlers.
                         }
 
+                        // --- msg C: complete a pending responder handshake ---
+                        if let Some((responder, _)) = pending_responders.remove(&from) {
+                            // Ignore anything that looks like a new handshake msg A/B here;
+                            // treat it as msg C (will fail to decrypt and be discarded).
+                            match responder.finish(&data) {
+                                Ok(resp_result) => {
+                                    let remote_static = *resp_result.transport.remote_static_key();
+                                    let peer_id = PeerId::from_bytes(remote_static);
+
+                                    tracing::info!(
+                                        target: "seednet",
+                                        peer = %peer_id.short(),
+                                        addr = %from,
+                                        "handshake completed (responder)"
+                                    );
+
+                                    let mut ts = transports_in.write().await;
+                                    ts.insert(peer_id, resp_result.transport);
+                                    drop(ts);
+
+                                    let mut a2p = addr_to_peer_in.write().await;
+                                    a2p.insert(from, peer_id);
+                                    drop(a2p);
+
+                                    let mut pu_w = peer_underlays_in.write().await;
+                                    pu_w.insert(peer_id, from);
+                                    drop(pu_w);
+
+                                    let overlay = derive_overlay_addr(&peer_id);
+                                    let mut rt = routing_table_in.write().await;
+                                    rt.add_route(overlay, peer_id);
+                                    drop(rt);
+
+                                    let _peer = peer_mgr_in.discover(peer_id, from).await;
+                                    let _ = peer_mgr_in
+                                        .transition_peer(&peer_id, PeerState::Connecting)
+                                        .await;
+                                    let _ = peer_mgr_in
+                                        .transition_peer(&peer_id, PeerState::Handshaking)
+                                        .await;
+                                    let _ = peer_mgr_in
+                                        .transition_peer(&peer_id, PeerState::Connected)
+                                        .await;
+
+                                    tracing::info!(
+                                        target: "seednet",
+                                        peer = %peer_id.short(),
+                                        overlay = %overlay,
+                                        addr = %from,
+                                        "peer route registered (responder)"
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::debug!(target: "seednet", from = %from, error = %e, "responder finish (msg C) failed");
+                                }
+                            }
+                            continue;
+                        }
+
+                        // --- data from an established peer ---
                         let a2p = addr_to_peer_in.read().await;
                         if let Some(peer_id) = a2p.get(&from) {
                             let peer_id = *peer_id;
@@ -277,7 +350,7 @@ impl SeedNetEngine {
 
                             let mut ts = transports_in.write().await;
                             if let Some(transport) = ts.get_mut(&peer_id)
-                                && let Ok(decrypted) = transport.decrypt(data)
+                                && let Ok(decrypted) = transport.decrypt(&data)
                             {
                                 drop(ts);
                                 match seednet_peer::message::deserialize_message(&decrypted) {
@@ -292,7 +365,7 @@ impl SeedNetEngine {
                                         tracing::debug!(target: "seednet", from = %from, ?msg, "unhandled message type");
                                     }
                                     Err(_) => {
-                                        // legacy: raw IPv4 packet not wrapped in Message
+                                        // Legacy: raw IPv4 packet not wrapped in Message.
                                         let mut writer = tun_writer_in.lock().await;
                                         let _ = writer.send(&decrypted).await;
                                     }
@@ -302,106 +375,39 @@ impl SeedNetEngine {
                         }
                         drop(a2p);
 
+                        // --- msg A: start responder handshake, send msg B, park state ---
                         if data.starts_with(NOISE_HANDSHAKE_INITIATOR_PREFIX) {
                             let noise_payload = &data[NOISE_HANDSHAKE_INITIATOR_PREFIX.len()..];
 
-                            if let Ok(mut responder) =
-                                ResponderHandshake::new(&network_secret_resp, &device_keys_resp)
-                                && responder.read_message_a(noise_payload).is_ok()
-                                && let Ok(msg_b) = responder.write_message_b(&[])
-                            {
-                                let mut tagged = NOISE_HANDSHAKE_RESPONDER_PREFIX.to_vec();
-                                tagged.extend_from_slice(&msg_b);
+                            match ResponderHandshake::new(&network_secret_resp, &device_keys_resp) {
+                                Ok(mut responder) => {
+                                    if responder.read_message_a(noise_payload).is_ok() {
+                                        match responder.write_message_b(&[]) {
+                                            Ok(msg_b) => {
+                                                let mut tagged =
+                                                    NOISE_HANDSHAKE_RESPONDER_PREFIX.to_vec();
+                                                tagged.extend_from_slice(&msg_b);
 
-                                tracing::info!(target: "seednet", from = %from, "received handshake msg A, sending msg B");
-                                let _ = udp_in.send_to(&tagged, from).await;
+                                                tracing::info!(target: "seednet", from = %from, "received handshake msg A, sending msg B");
+                                                let _ = udp_in.send_to(&tagged, from).await;
 
-                                let mut cbuf = vec![0u8; MAX_DATAGRAM];
-                                match tokio::time::timeout(
-                                    HANDSHAKE_TIMEOUT,
-                                    udp_in.recv_from(&mut cbuf),
-                                )
-                                .await
-                                {
-                                    Ok(Ok((cn, cfrom))) if cfrom == from => {
-                                        let cdata = &cbuf[..cn];
-
-                                        if cdata == b"seednet-heartbeat"
-                                            || cdata.starts_with(NOISE_HANDSHAKE_INITIATOR_PREFIX)
-                                            || cdata.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX)
-                                        {
-                                            tracing::warn!(target: "seednet", from = %from, "unexpected handshake/heartbeat during msg C wait");
-                                            continue;
+                                                // Park the half-completed handshake; msg C will
+                                                // arrive in a future iteration of this loop.
+                                                pending_responders.insert(
+                                                    from,
+                                                    (responder, std::time::Instant::now()),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                tracing::debug!(target: "seednet", from = %from, error = %e, "write_message_b failed");
+                                            }
                                         }
-
-                                        if let Ok(resp_result) = responder.finish(cdata) {
-                                            let remote_static =
-                                                *resp_result.transport.remote_static_key();
-                                            let peer_id = PeerId::from_bytes(remote_static);
-
-                                            tracing::info!(
-                                                target: "seednet",
-                                                peer = %peer_id.short(),
-                                                addr = %from,
-                                                "handshake completed (responder)"
-                                            );
-
-                                            let mut ts = transports_in.write().await;
-                                            ts.insert(peer_id, resp_result.transport);
-                                            drop(ts);
-
-                                            let mut a2p = addr_to_peer_in.write().await;
-                                            a2p.insert(from, peer_id);
-                                            drop(a2p);
-
-                                            let mut pu_w = peer_underlays_in.write().await;
-                                            pu_w.insert(peer_id, from);
-                                            drop(pu_w);
-
-                                            let overlay = derive_overlay_addr(&peer_id);
-                                            let mut rt = routing_table_in.write().await;
-                                            rt.add_route(overlay, peer_id);
-                                            drop(rt);
-
-                                            let _peer = peer_mgr_in.discover(peer_id, from).await;
-                                            let _ = peer_mgr_in
-                                                .transition_peer(&peer_id, PeerState::Connecting)
-                                                .await;
-                                            let _ = peer_mgr_in
-                                                .transition_peer(&peer_id, PeerState::Handshaking)
-                                                .await;
-                                            let _ = peer_mgr_in
-                                                .transition_peer(&peer_id, PeerState::Connected)
-                                                .await;
-
-                                            tracing::info!(
-                                                target: "seednet",
-                                                peer = %peer_id.short(),
-                                                overlay = %overlay,
-                                                addr = %from,
-                                                "peer route registered (responder)"
-                                            );
-                                        }
+                                    } else {
+                                        tracing::debug!(target: "seednet", from = %from, "read_message_a failed (wrong network?)");
                                     }
-                                    Ok(Ok((cn, cfrom))) => {
-                                        tracing::warn!(
-                                            target: "seednet",
-                                            expected = %from,
-                                            got = %cfrom,
-                                            "msg C from unexpected address"
-                                        );
-                                        let mut pending = pending_in.write().await;
-                                        if let Some(sender) = pending.remove(&cfrom) {
-                                            drop(pending);
-                                            let _ = sender.send(cbuf[..cn].to_vec());
-                                        }
-                                    }
-                                    Ok(Err(e)) => {
-                                        tracing::debug!(target: "seednet", error = %e, "recv error during handshake");
-                                    }
-                                    Err(_) => {
-                                        tracing::debug!(target: "seednet", from = %from, "handshake msg C timed out");
-                                    }
+                                }
+                                Err(e) => {
+                                    tracing::warn!(target: "seednet", error = %e, "responder create failed");
                                 }
                             }
                         }
