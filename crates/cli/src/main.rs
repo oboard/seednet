@@ -1,5 +1,6 @@
 //! `seednet` — command-line entry point.
 //!
+//! * `seednet` (no subcommand) — launch the interactive TUI.
 //! * `seednet up <SEED>` — launch the overlay as a background daemon.
 //! * `seednet down` — stop the running daemon.
 //! * `seednet list` — list connected peers.
@@ -12,6 +13,7 @@
 
 mod commands;
 mod logging;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -36,7 +38,7 @@ struct Cli {
     verbose: u8,
 
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -97,13 +99,20 @@ fn main() -> Result<()> {
         None => seednet_config::StateDir::default_user()?,
     };
 
+    // No subcommand → launch TUI.
+    let Some(command) = cli.command else {
+        let state_path = state_dir.path().to_path_buf();
+        let exe = std::env::current_exe()?;
+        return tui::run(state_path, exe);
+    };
+
     logging::init(cli.verbose);
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
 
-    match cli.command {
+    match command {
         Command::Identity { seed } => {
             let seed = Seed::from_passphrase(&seed);
             rt.block_on(commands::identity(&state_dir, &seed))?;

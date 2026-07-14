@@ -18,5 +18,6 @@ pub fn init(verbose: u8) {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(env_filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .try_init();
 }
