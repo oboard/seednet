@@ -14,6 +14,8 @@ pub struct PeerInner {
     pub overlay_addr: Option<OverlayAddr>,
     pub overlay_ipv6: Option<Ipv6Addr>,
     pub underlay_addr: Option<SocketAddr>,
+    /// STUN-discovered public address reported by the peer via SessionInit.
+    pub public_addr: Option<SocketAddr>,
     pub hostname: String,
     pub state: StateRecord,
 }
@@ -33,6 +35,7 @@ impl Peer {
                 overlay_addr: None,
                 overlay_ipv6: None,
                 underlay_addr: None,
+                public_addr: None,
                 hostname: String::new(),
                 state: StateRecord::new(PeerState::Disconnected),
             })),
@@ -47,6 +50,7 @@ impl Peer {
                 overlay_addr: None,
                 overlay_ipv6: None,
                 underlay_addr: Some(addr),
+                public_addr: None,
                 hostname: String::new(),
                 state: StateRecord::new(PeerState::Disconnected),
             })),
@@ -77,6 +81,10 @@ impl Peer {
         self.inner.read().await.hostname.clone()
     }
 
+    pub async fn public_addr(&self) -> Option<SocketAddr> {
+        self.inner.read().await.public_addr
+    }
+
     pub async fn set_overlay_addr(&self, addr: OverlayAddr) {
         self.inner.write().await.overlay_addr = Some(addr);
     }
@@ -91,6 +99,10 @@ impl Peer {
 
     pub async fn set_hostname(&self, name: String) {
         self.inner.write().await.hostname = name;
+    }
+
+    pub async fn set_public_addr(&self, addr: SocketAddr) {
+        self.inner.write().await.public_addr = Some(addr);
     }
 
     pub async fn transition(

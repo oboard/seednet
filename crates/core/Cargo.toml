@@ -16,6 +16,8 @@ seednet-peer = { workspace = true }
 seednet-tun = { workspace = true }
 seednet-overlay = { workspace = true }
 seednet-routing = { workspace = true }
+seednet-nat = { workspace = true }
+rand = { workspace = true }
 tokio = { workspace = true }
 dashmap = { workspace = true }
 serde_json = { workspace = true }

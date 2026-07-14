@@ -169,6 +169,7 @@ async fn session_init_with_metadata_round_trips() {
         overlay: overlay_a,
         overlay_ipv6: Some(ipv6_a.octets()),
         hostname: "my-server.local".to_string(),
+        public_addr: None,
     };
 
     let wire = t_a.encrypt(&serialize_message(&init_msg)).unwrap();
@@ -181,6 +182,7 @@ async fn session_init_with_metadata_round_trips() {
             overlay,
             overlay_ipv6,
             hostname,
+            ..
         } => {
             assert_eq!(peer_id, peer_id_a);
             assert_eq!(overlay, overlay_a);

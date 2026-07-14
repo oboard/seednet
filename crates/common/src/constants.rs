@@ -38,3 +38,15 @@ pub const SIGNATURE_LEN: usize = 64;
 pub const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 /// Peer session expiration: no traffic for this long marks a peer `Dead`.
 pub const SESSION_EXPIRY_SECS: u64 = 60;
+
+/// Public STUN servers used to discover the node's NAT-mapped public address.
+/// Queried in order; first success wins.
+pub const STUN_SERVERS: &[&str] = &[
+    "stun.l.google.com:19302",
+    "stun.cloudflare.com:3478",
+    "stun1.l.google.com:19302",
+];
+
+/// Wire prefix for unencrypted hole-punch probe packets.
+/// Must not collide with Noise handshake prefixes (`seednet-hs-a`, `seednet-hs-b`).
+pub const HOLE_PUNCH_PROBE_PREFIX: &[u8] = b"seednet-hp\0";

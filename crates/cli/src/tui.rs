@@ -55,6 +55,8 @@ struct Peer {
     overlay_ipv6: String,
     underlay: String,
     hostname: String,
+    connection: String, // "direct" or "relay"
+    relay_via: String,
     is_local: bool,
 }
 
@@ -288,6 +290,8 @@ impl App {
                 overlay_ipv6: p["overlay_ipv6"].as_str().unwrap_or("").to_string(),
                 underlay: String::new(),
                 hostname: p["hostname"].as_str().unwrap_or("").to_string(),
+                connection: "direct".to_string(),
+                relay_via: String::new(),
                 is_local: true,
             })
         });
@@ -311,6 +315,8 @@ impl App {
                     overlay_ipv6: p["overlay_ipv6"].as_str().unwrap_or("").to_string(),
                     underlay: p["underlay"].as_str()?.to_string(),
                     hostname: p["hostname"].as_str().unwrap_or("").to_string(),
+                    connection: p["connection"].as_str().unwrap_or("direct").to_string(),
+                    relay_via: p["relay_via"].as_str().unwrap_or("").to_string(),
                     is_local: false,
                 })
             })
@@ -707,6 +713,20 @@ impl App {
                                 Span::styled(&p.overlay_ipv6, Style::default().fg(Color::Green)),
                             ]));
                         }
+                        let conn_color = if p.connection == "relay" {
+                            Color::Yellow
+                        } else {
+                            Color::DarkGray
+                        };
+                        let conn_label = if p.connection == "relay" && !p.relay_via.is_empty() {
+                            format!("relay via {}", p.relay_via)
+                        } else {
+                            p.connection.clone()
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("    conn     ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(conn_label, Style::default().fg(conn_color)),
+                        ]));
                         lines.push(Line::from(vec![
                             Span::styled("    underlay ", Style::default().fg(Color::DarkGray)),
                             Span::styled(&p.underlay, Style::default().fg(Color::White)),

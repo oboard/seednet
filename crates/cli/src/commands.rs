@@ -238,18 +238,19 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
         return Ok(());
     }
 
-    let col_id = 10usize;
+    let col_id = 18usize;
     let col_overlay = 16usize;
     let col_ipv6 = 40usize;
+    let col_conn = 10usize;
     let col_underlay = 26usize;
 
     println!(
-        "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_underlay$}",
-        "PEER ID", "OVERLAY IPv4", "OVERLAY IPv6", "UNDERLAY ADDR"
+        "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_conn$}  {:<col_underlay$}",
+        "PEER ID (hostname)", "OVERLAY IPv4", "OVERLAY IPv6", "CONN", "UNDERLAY ADDR"
     );
     println!(
         "{}",
-        "─".repeat(col_id + 2 + col_overlay + 2 + col_ipv6 + 2 + col_underlay)
+        "─".repeat(col_id + 2 + col_overlay + 2 + col_ipv6 + 2 + col_conn + 2 + col_underlay)
     );
 
     for p in peers {
@@ -257,15 +258,22 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
         let overlay = p["overlay"].as_str().unwrap_or("?");
         let ipv6 = p["overlay_ipv6"].as_str().unwrap_or("");
         let hostname = p["hostname"].as_str().unwrap_or("");
+        let connection = p["connection"].as_str().unwrap_or("direct");
+        let relay_via = p["relay_via"].as_str().unwrap_or("");
         let under = p["underlay"].as_str().unwrap_or("?");
         let display_id = if hostname.is_empty() {
             short.to_string()
         } else {
             format!("{short} ({hostname})")
         };
+        let conn_display = if connection == "relay" && !relay_via.is_empty() {
+            format!("relay/{relay_via}")
+        } else {
+            connection.to_string()
+        };
         println!(
-            "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_underlay$}",
-            display_id, overlay, ipv6, under
+            "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_conn$}  {:<col_underlay$}",
+            display_id, overlay, ipv6, conn_display, under
         );
     }
     println!();

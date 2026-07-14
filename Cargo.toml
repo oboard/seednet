@@ -10,6 +10,7 @@ members = [
     "crates/overlay",
     "crates/routing",
     "crates/core",
+    "crates/nat",
     "crates/integration-tests",
     "crates/cli",
 ]
@@ -70,6 +71,7 @@ anyhow = "1.0"
 ratatui = "0.29"
 crossterm = "0.28"
 libc = "0.2"
+seednet-nat = { path = "crates/nat" }
 
 [profile.release]
 opt-level = 3

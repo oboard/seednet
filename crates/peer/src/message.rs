@@ -20,6 +20,37 @@ pub enum Message {
         overlay_ipv6: Option<[u8; 16]>,
         /// Hostname of the sending device (best-effort, may be empty).
         hostname: String,
+        /// STUN-discovered public address of the sender.
+        public_addr: Option<SocketAddr>,
+    },
+    /// Unencrypted probe sent to open a NAT mapping.
+    /// Wire format: HOLE_PUNCH_PROBE_PREFIX + postcard(this variant).
+    HolePunchProbe {
+        token: u64,
+    },
+    /// Acknowledgement to a HolePunchProbe.
+    HolePunchAck {
+        token: u64,
+    },
+    /// Request a relay node to forward traffic to `dst_peer_id`.
+    RelayRequest {
+        dst_peer_id: PeerId,
+    },
+    /// Relay node confirms it can forward between the two peers.
+    RelayReady {
+        relay_peer_id: PeerId,
+        dst_peer_id: PeerId,
+    },
+    /// Encapsulated data for relay forwarding.
+    /// `payload` is already Noise-encrypted — relay never decrypts it.
+    RelayData {
+        dst_peer_id: PeerId,
+        payload: Vec<u8>,
+    },
+    /// Broadcast by relay-capable nodes to advertise their public address.
+    RelayAnnounce {
+        relay_peer_id: PeerId,
+        public_addr: SocketAddr,
     },
 }
 

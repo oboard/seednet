@@ -307,6 +307,7 @@ mod tests {
                 overlay: OverlayAddr::new(std::net::Ipv4Addr::new(10, 88, 1, 1)),
                 overlay_ipv6: None,
                 hostname: String::new(),
+                public_addr: None,
             },
         ];
         for msg in cases {
