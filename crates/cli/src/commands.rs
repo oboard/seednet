@@ -240,24 +240,32 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
 
     let col_id = 10usize;
     let col_overlay = 16usize;
+    let col_ipv6 = 40usize;
     let col_underlay = 26usize;
 
     println!(
-        "{:<col_id$}  {:<col_overlay$}  {:<col_underlay$}",
-        "PEER ID", "OVERLAY IP", "UNDERLAY ADDR"
+        "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_underlay$}",
+        "PEER ID", "OVERLAY IPv4", "OVERLAY IPv6", "UNDERLAY ADDR"
     );
     println!(
         "{}",
-        "─".repeat(col_id + 2 + col_overlay + 2 + col_underlay)
+        "─".repeat(col_id + 2 + col_overlay + 2 + col_ipv6 + 2 + col_underlay)
     );
 
     for p in peers {
         let short = p["id_short"].as_str().unwrap_or("?");
         let overlay = p["overlay"].as_str().unwrap_or("?");
+        let ipv6 = p["overlay_ipv6"].as_str().unwrap_or("");
+        let hostname = p["hostname"].as_str().unwrap_or("");
         let under = p["underlay"].as_str().unwrap_or("?");
+        let display_id = if hostname.is_empty() {
+            short.to_string()
+        } else {
+            format!("{short} ({hostname})")
+        };
         println!(
-            "{:<col_id$}  {:<col_overlay$}  {:<col_underlay$}",
-            short, overlay, under
+            "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_underlay$}",
+            display_id, overlay, ipv6, under
         );
     }
     println!();

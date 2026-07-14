@@ -18,10 +18,7 @@ use std::{
 };
 
 use crossterm::{
-    event::{
-        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind,
-    },
+    event::{self, Event, KeyCode, KeyModifiers},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -77,15 +74,6 @@ pub struct App {
     exe_path: PathBuf,
     last_poll: Instant,
     log_file_offset: u64,
-    // Cached layout rects for mouse hit-testing (updated each render).
-    rect_seed: Rect,
-    rect_btn: Rect,
-    rect_peers: Rect,
-    rect_log: Rect,
-}
-
-fn zero_rect() -> Rect {
-    Rect::new(0, 0, 0, 0)
 }
 
 impl App {
@@ -106,10 +94,6 @@ impl App {
             exe_path,
             last_poll: Instant::now() - POLL_INTERVAL,
             log_file_offset: 0,
-            rect_seed: zero_rect(),
-            rect_btn: zero_rect(),
-            rect_peers: zero_rect(),
-            rect_log: zero_rect(),
         };
         s.push_log("SeedNet TUI ready. Tab to switch focus, Enter or click Start.");
         s
@@ -469,50 +453,6 @@ impl App {
 
     // ── input handling ────────────────────────────────────────────────────
 
-    fn contains(rect: Rect, col: u16, row: u16) -> bool {
-        col >= rect.x && col < rect.x + rect.width && row >= rect.y && row < rect.y + rect.height
-    }
-
-    fn handle_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) {
-        match kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                if Self::contains(self.rect_seed, col, row) {
-                    self.focus = Focus::Seed;
-                } else if Self::contains(self.rect_btn, col, row) {
-                    self.toggle_daemon();
-                } else if Self::contains(self.rect_peers, col, row) {
-                    self.focus = Focus::Peers;
-                    if !self.peers.is_empty() && self.peers_list_state.selected().is_none() {
-                        self.peers_list_state.select(Some(0));
-                    }
-                } else if Self::contains(self.rect_log, col, row) {
-                    self.focus = Focus::Log;
-                }
-            }
-            MouseEventKind::ScrollUp => {
-                let panel = if Self::contains(self.rect_peers, col, row) {
-                    Focus::Peers
-                } else if Self::contains(self.rect_log, col, row) {
-                    Focus::Log
-                } else {
-                    self.focus.clone()
-                };
-                self.scroll_by_panel(-3, &panel);
-            }
-            MouseEventKind::ScrollDown => {
-                let panel = if Self::contains(self.rect_peers, col, row) {
-                    Focus::Peers
-                } else if Self::contains(self.rect_log, col, row) {
-                    Focus::Log
-                } else {
-                    self.focus.clone()
-                };
-                self.scroll_by_panel(3, &panel);
-            }
-            _ => {}
-        }
-    }
-
     fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> bool {
         match code {
             KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => return true,
@@ -595,9 +535,6 @@ impl App {
             .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
             .split(chunks[1]);
 
-        self.rect_peers = body[0];
-        self.rect_log = body[1];
-
         self.render_peers(f, body[0]);
         self.render_log(f, body[1]);
     }
@@ -628,7 +565,7 @@ impl App {
             s.insert(byte_pos, '│');
             s
         } else if self.seed_input.is_empty() {
-            "─── click or Tab to focus, type seed, Enter to start ───".to_string()
+            "─── Tab to focus, type seed, Enter to start ───".to_string()
         } else {
             obscure(&self.seed_input)
         };
@@ -648,9 +585,6 @@ impl App {
                 Constraint::Length(9),
             ])
             .split(area);
-
-        self.rect_seed = inner[1];
-        self.rect_btn = inner[2];
 
         let status = Paragraph::new(Line::from(Span::styled(
             format!(" {status_text} "),
@@ -890,7 +824,7 @@ impl App {
 pub fn run(state_dir: PathBuf, exe_path: PathBuf) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
@@ -899,11 +833,7 @@ pub fn run(state_dir: PathBuf, exe_path: PathBuf) -> anyhow::Result<()> {
     let result = run_loop(&mut terminal, &mut app);
 
     disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
     result
@@ -917,21 +847,14 @@ fn run_loop(
         app.poll();
         terminal.draw(|f| app.render(f))?;
 
-        if event::poll(Duration::from_millis(100))? {
-            match event::read()? {
-                Event::Key(key) => {
-                    if app.handle_key(key.code, key.modifiers) {
-                        if matches!(app.daemon, DaemonState::Running { .. }) {
-                            app.stop_daemon();
-                        }
-                        break;
-                    }
-                }
-                Event::Mouse(m) => {
-                    app.handle_mouse(m.kind, m.column, m.row);
-                }
-                _ => {}
+        if event::poll(Duration::from_millis(100))?
+            && let Event::Key(key) = event::read()?
+            && app.handle_key(key.code, key.modifiers)
+        {
+            if matches!(app.daemon, DaemonState::Running { .. }) {
+                app.stop_daemon();
             }
+            break;
         }
     }
     Ok(())
