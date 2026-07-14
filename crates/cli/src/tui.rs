@@ -56,6 +56,7 @@ struct Peer {
     id_short: String,
     overlay: String,
     underlay: String,
+    is_local: bool,
 }
 
 pub struct App {
@@ -257,9 +258,11 @@ impl App {
 
         match (&self.daemon, pid) {
             (DaemonState::Starting, Some(pid)) => {
-                let overlay = self.read_overlay().unwrap_or_default();
-                self.push_log(format!("Daemon running (pid {pid}, overlay {overlay})"));
-                self.daemon = DaemonState::Running { pid, overlay };
+                self.push_log(format!("Daemon running (pid {pid})"));
+                self.daemon = DaemonState::Running {
+                    pid,
+                    overlay: String::new(),
+                };
             }
             (DaemonState::Running { .. }, None) => {
                 self.push_log("Daemon disappeared.");
@@ -289,37 +292,63 @@ impl App {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(&json_str) else {
             return;
         };
+
+        // Local node entry — always first in the list.
+        let local: Option<Peer> = v["local"].as_object().and_then(|p| {
+            Some(Peer {
+                id_short: p["id_short"].as_str()?.to_string(),
+                overlay: p["overlay"].as_str()?.to_string(),
+                underlay: String::new(),
+                is_local: true,
+            })
+        });
+
+        // Update header overlay display.
+        if let Some(ref l) = local
+            && let DaemonState::Running { overlay, .. } = &mut self.daemon
+        {
+            *overlay = l.overlay.clone();
+        }
+
         let Some(arr) = v["peers"].as_array() else {
             return;
         };
-        let new_peers: Vec<Peer> = arr
+        let remote_peers: Vec<Peer> = arr
             .iter()
             .filter_map(|p| {
                 Some(Peer {
                     id_short: p["id_short"].as_str()?.to_string(),
                     overlay: p["overlay"].as_str()?.to_string(),
                     underlay: p["underlay"].as_str()?.to_string(),
+                    is_local: false,
                 })
             })
             .collect();
 
-        let old_count = self.peers.len();
-        let new_count = new_peers.len();
-        if new_count > old_count {
-            for p in &new_peers[old_count..] {
+        // Count only remote peers for connect/disconnect log messages.
+        let old_remote = self.peers.iter().filter(|p| !p.is_local).count();
+        let new_remote = remote_peers.len();
+        if new_remote > old_remote {
+            for p in &remote_peers[old_remote..] {
                 self.push_log(format!(
                     "Peer connected: {} ({} / {})",
                     p.id_short, p.overlay, p.underlay
                 ));
             }
-        } else if new_count < old_count {
+        } else if new_remote < old_remote {
             self.push_log(format!(
                 "{} peer(s) disconnected ({} → {})",
-                old_count - new_count,
-                old_count,
-                new_count
+                old_remote - new_remote,
+                old_remote,
+                new_remote
             ));
         }
+
+        let mut new_peers = Vec::with_capacity(1 + remote_peers.len());
+        if let Some(l) = local {
+            new_peers.push(l);
+        }
+        new_peers.extend(remote_peers);
         self.peers = new_peers;
     }
 
@@ -352,10 +381,6 @@ impl App {
                 self.push_log(line);
             }
         }
-    }
-
-    fn read_overlay(&self) -> Option<String> {
-        None
     }
 
     // ── scrolling helpers ─────────────────────────────────────────────────
@@ -668,11 +693,11 @@ impl App {
 
     fn render_peers(&mut self, f: &mut Frame, area: Rect) {
         let focused = self.focus == Focus::Peers;
-        let count = self.peers.len();
+        let remote_count = self.peers.iter().filter(|p| !p.is_local).count();
         let title = if focused {
-            format!(" Peers ({count}) [↑↓] ")
+            format!(" Peers ({remote_count}) [↑↓] ")
         } else {
-            format!(" Peers ({count}) ")
+            format!(" Peers ({remote_count}) ")
         };
 
         let items: Vec<ListItem> = if self.peers.is_empty() {
@@ -684,25 +709,47 @@ impl App {
             self.peers
                 .iter()
                 .map(|p| {
-                    ListItem::new(Text::from(vec![
-                        Line::from(vec![
-                            Span::styled("  ", Style::default()),
-                            Span::styled(
-                                &p.id_short,
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            ),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("    overlay  ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&p.overlay, Style::default().fg(Color::Green)),
-                        ]),
-                        Line::from(vec![
-                            Span::styled("    underlay ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&p.underlay, Style::default().fg(Color::White)),
-                        ]),
-                    ]))
+                    if p.is_local {
+                        ListItem::new(Text::from(vec![
+                            Line::from(vec![
+                                Span::styled("  ", Style::default()),
+                                Span::styled(
+                                    &p.id_short,
+                                    Style::default()
+                                        .fg(Color::Magenta)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(
+                                    " (you)",
+                                    Style::default().fg(Color::DarkGray),
+                                ),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("    overlay  ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(&p.overlay, Style::default().fg(Color::Magenta)),
+                            ]),
+                        ]))
+                    } else {
+                        ListItem::new(Text::from(vec![
+                            Line::from(vec![
+                                Span::styled("  ", Style::default()),
+                                Span::styled(
+                                    &p.id_short,
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("    overlay  ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(&p.overlay, Style::default().fg(Color::Green)),
+                            ]),
+                            Line::from(vec![
+                                Span::styled("    underlay ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(&p.underlay, Style::default().fg(Color::White)),
+                            ]),
+                        ]))
+                    }
                 })
                 .collect()
         };

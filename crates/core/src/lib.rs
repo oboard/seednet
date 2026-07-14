@@ -640,11 +640,23 @@ impl SeedNetEngine {
         let routing_table_evt = self.routing_table.clone();
         let peer_mgr_evt = self.peer_manager.clone();
         let state_dir_evt = self.config.state_dir.clone();
+        let local_id = self.our_peer_id;
+        let local_overlay = self.our_overlay;
+
+        let local_json = format!(
+            concat!(
+                r#"{{"id":"{id}","id_short":"{short}","#,
+                r#""overlay":"{overlay}","underlay":""}}"#,
+            ),
+            id = local_id,
+            short = local_id.short(),
+            overlay = local_overlay,
+        );
 
         let peers_file_handle = tokio::spawn(async move {
-            // Write an initial empty snapshot so list shows "no peers" rather
-            // than stale data from a previous run.
-            let _ = state_dir_evt.write_peers_json(r#"{"peers":[]}"#);
+            // Write an initial snapshot with local info and no remote peers.
+            let _ = state_dir_evt
+                .write_peers_json(&format!(r#"{{"local":{local_json},"peers":[]}}"#));
 
             loop {
                 match peer_events.recv().await {
@@ -684,7 +696,10 @@ impl SeedNetEngine {
                         }
                         drop(rt);
 
-                        let json = format!(r#"{{"peers":[{}]}}"#, entries.join(","));
+                        let json = format!(
+                            r#"{{"local":{local_json},"peers":[{}]}}"#,
+                            entries.join(",")
+                        );
                         let _ = state_dir_evt.write_peers_json(&json);
                     }
                     Ok(_) => {}
