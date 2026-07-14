@@ -91,11 +91,11 @@ pub async fn up(
             Err(_) => {}   // can't check; proceed
         }
 
-        if let Some(pid) = state_dir.read_pid()? {
-            if process_alive(pid) {
-                break; // daemon is up and healthy
-            }
-            // PID was written but process already exited — it crashed right
+        if let Some(pid) = state_dir.read_pid()?
+            && process_alive(pid)
+        {
+            break; // daemon is up and healthy
+            // If PID was written but process already exited — it crashed right
             // after writing the PID file.  Fall through so we pick up the
             // child.try_wait() path on the next tick.
         }

@@ -20,12 +20,21 @@ use seednet_common::{Error, NetworkSecret};
 
 pub const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_BLAKE2s";
 pub const MAX_MESSAGE_LEN: usize = 65535;
-pub const TRANSPORT_OVERHEAD: usize = 16;
+/// Per-packet overhead: 8-byte nonce prefix + 16-byte AEAD tag.
+pub const TRANSPORT_OVERHEAD: usize = 8 + 16;
 
+/// Nonce size prepended to every encrypted UDP datagram.
+const NONCE_LEN: usize = 8;
+
+/// Encrypted transport using `StatelessTransportState` (per-packet nonce).
+///
+/// Each datagram carries its 8-byte LE nonce as a prefix, so dropped or
+/// reordered UDP packets never desynchronize the counter.
 #[derive(Debug)]
 pub struct SecureTransport {
-    state: snow::TransportState,
+    state: snow::StatelessTransportState,
     remote_static: [u8; 32],
+    send_nonce: u64,
 }
 
 pub struct HandshakeResult {
@@ -57,6 +66,22 @@ fn responder_state(
         .map_err(|e| Error::NoiseHandshake(format!("local key: {e}")))?
         .build_responder()
         .map_err(|e| Error::NoiseHandshake(format!("responder build: {e}")))
+}
+
+fn into_transport(state: snow::HandshakeState) -> std::result::Result<SecureTransport, Error> {
+    let remote_static = state
+        .get_remote_static()
+        .ok_or_else(|| Error::NoiseHandshake("remote static key unavailable".into()))?;
+    let mut rs = [0u8; 32];
+    rs.copy_from_slice(remote_static);
+    let ts = state
+        .into_stateless_transport_mode()
+        .map_err(|e| Error::NoiseHandshake(format!("into transport: {e}")))?;
+    Ok(SecureTransport {
+        state: ts,
+        remote_static: rs,
+        send_nonce: 0,
+    })
 }
 
 #[derive(Debug)]
@@ -102,22 +127,9 @@ impl InitiatorHandshake {
             .map_err(|e| Error::NoiseHandshake(format!("msg C write: {e}")))?;
         buf.truncate(n);
         let msg_bytes = buf;
-
-        let remote_static = state
-            .get_remote_static()
-            .ok_or_else(|| Error::NoiseHandshake("remote static key unavailable".into()))?;
-        let mut rs = [0u8; 32];
-        rs.copy_from_slice(remote_static);
-
-        let transport_state = state
-            .into_transport_mode()
-            .map_err(|e| Error::NoiseHandshake(format!("into transport: {e}")))?;
-
+        let transport = into_transport(state)?;
         Ok(HandshakeResult {
-            transport: SecureTransport {
-                state: transport_state,
-                remote_static: rs,
-            },
+            transport,
             msg_bytes,
         })
     }
@@ -161,46 +173,47 @@ impl ResponderHandshake {
     pub fn finish(mut self, msg: &[u8]) -> std::result::Result<HandshakeResult, Error> {
         let mut state = self.state.take().unwrap();
         let mut buf = vec![0u8; MAX_MESSAGE_LEN];
-        let _n = state
+        state
             .read_message(msg, &mut buf)
             .map_err(|e| Error::NoiseHandshake(format!("msg C read: {e}")))?;
-
-        let remote_static = state
-            .get_remote_static()
-            .ok_or_else(|| Error::NoiseHandshake("remote static key unavailable".into()))?;
-        let mut rs = [0u8; 32];
-        rs.copy_from_slice(remote_static);
-
-        let transport_state = state
-            .into_transport_mode()
-            .map_err(|e| Error::NoiseHandshake(format!("into transport: {e}")))?;
-
+        let transport = into_transport(state)?;
         Ok(HandshakeResult {
-            transport: SecureTransport {
-                state: transport_state,
-                remote_static: rs,
-            },
+            transport,
             msg_bytes: Vec::new(),
         })
     }
 }
 
 impl SecureTransport {
+    /// Encrypt `plaintext`. Wire format: `[ nonce: 8 B LE ][ ciphertext + AEAD tag ]`.
     pub fn encrypt(&mut self, plaintext: &[u8]) -> std::result::Result<Vec<u8>, Error> {
-        let mut buf = vec![0u8; plaintext.len() + TRANSPORT_OVERHEAD];
+        let nonce = self.send_nonce;
+        self.send_nonce = self.send_nonce.wrapping_add(1);
+
+        let mut out = Vec::with_capacity(NONCE_LEN + plaintext.len() + 16);
+        out.extend_from_slice(&nonce.to_le_bytes());
+        let body_start = out.len();
+        out.resize(body_start + plaintext.len() + 16, 0u8);
+
         let n = self
             .state
-            .write_message(plaintext, &mut buf)
+            .write_message(nonce, plaintext, &mut out[body_start..])
             .map_err(|e| Error::NoiseTransport(format!("encrypt: {e}")))?;
-        buf.truncate(n);
-        Ok(buf)
+        out.truncate(body_start + n);
+        Ok(out)
     }
 
-    pub fn decrypt(&mut self, ciphertext: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+    /// Decrypt a datagram produced by `encrypt`.
+    pub fn decrypt(&mut self, datagram: &[u8]) -> std::result::Result<Vec<u8>, Error> {
+        if datagram.len() < NONCE_LEN + 16 {
+            return Err(Error::NoiseTransport("datagram too short".into()));
+        }
+        let nonce = u64::from_le_bytes(datagram[..NONCE_LEN].try_into().unwrap());
+        let ciphertext = &datagram[NONCE_LEN..];
         let mut buf = vec![0u8; ciphertext.len()];
         let n = self
             .state
-            .read_message(ciphertext, &mut buf)
+            .read_message(nonce, ciphertext, &mut buf)
             .map_err(|e| Error::NoiseTransport(format!("decrypt: {e}")))?;
         buf.truncate(n);
         Ok(buf)
@@ -316,7 +329,7 @@ mod tests {
 
         let (_, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
-        let result = t_b.decrypt(&[0xff; 64]);
+        let result = t_b.decrypt(&[0xff; NONCE_LEN + 16 + 1]);
         assert!(result.is_err(), "decrypting garbage should fail");
     }
 
@@ -332,5 +345,26 @@ mod tests {
         let enc = t_a.encrypt(&[]).unwrap();
         let dec = t_b.decrypt(&enc).unwrap();
         assert!(dec.is_empty());
+    }
+
+    #[test]
+    fn out_of_order_and_dropped_packets_still_decrypt() {
+        let secret = test_secret();
+        let keys_a = test_keys_a();
+        let keys_b = test_keys_b();
+
+        let (mut t_a, mut t_b) =
+            complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
+
+        let enc0 = t_a.encrypt(b"pkt 0").unwrap();
+        let enc1 = t_a.encrypt(b"pkt 1").unwrap();
+        let enc2 = t_a.encrypt(b"pkt 2").unwrap();
+
+        // Drop enc0; pkt 1 and 2 must still work.
+        assert_eq!(&t_b.decrypt(&enc1).unwrap(), b"pkt 1");
+        assert_eq!(&t_b.decrypt(&enc2).unwrap(), b"pkt 2");
+
+        // Out-of-order: enc0 arrives late.
+        assert_eq!(&t_b.decrypt(&enc0).unwrap(), b"pkt 0");
     }
 }
