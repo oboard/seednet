@@ -68,7 +68,8 @@ pub struct App {
     peers: Vec<Peer>,
     peers_list_state: ListState,
     log_lines: Vec<String>,
-    log_list_state: ListState,
+    log_scroll: usize,
+    log_col: usize,
     log_follow: bool,
     state_dir: PathBuf,
     exe_path: PathBuf,
@@ -96,7 +97,8 @@ impl App {
             peers: Vec::new(),
             peers_list_state: ListState::default(),
             log_lines: Vec::new(),
-            log_list_state: ListState::default(),
+            log_scroll: 0,
+            log_col: 0,
             log_follow: true,
             state_dir,
             exe_path,
@@ -118,8 +120,7 @@ impl App {
             self.log_lines.drain(..self.log_lines.len() - MAX_LOG_LINES);
         }
         if self.log_follow {
-            let last = self.log_lines.len().saturating_sub(1);
-            self.log_list_state.select(Some(last));
+            self.log_scroll = self.log_lines.len().saturating_sub(1);
         }
     }
 
@@ -400,12 +401,7 @@ impl App {
             }
             Focus::Log => {
                 self.log_follow = false;
-                let i = self
-                    .log_list_state
-                    .selected()
-                    .map(|i| i.saturating_sub(1))
-                    .unwrap_or(0);
-                self.log_list_state.select(Some(i));
+                self.log_scroll = self.log_scroll.saturating_sub(1);
             }
             Focus::Seed => {}
         }
@@ -427,17 +423,24 @@ impl App {
             }
             Focus::Log => {
                 let max = self.log_lines.len().saturating_sub(1);
-                let i = self
-                    .log_list_state
-                    .selected()
-                    .map(|i| (i + 1).min(max))
-                    .unwrap_or(max);
-                self.log_list_state.select(Some(i));
-                if i >= max {
+                self.log_scroll = (self.log_scroll + 1).min(max);
+                if self.log_scroll >= max {
                     self.log_follow = true;
                 }
             }
             Focus::Seed => {}
+        }
+    }
+
+    fn scroll_left(&mut self) {
+        if matches!(self.focus, Focus::Log) {
+            self.log_col = self.log_col.saturating_sub(4);
+        }
+    }
+
+    fn scroll_right(&mut self) {
+        if matches!(self.focus, Focus::Log) {
+            self.log_col += 4;
         }
     }
 
@@ -478,10 +481,6 @@ impl App {
                     }
                 } else if Self::contains(self.rect_log, col, row) {
                     self.focus = Focus::Log;
-                    if self.log_list_state.selected().is_none() {
-                        let last = self.log_lines.len().saturating_sub(1);
-                        self.log_list_state.select(Some(last));
-                    }
                 }
             }
             MouseEventKind::ScrollUp => {
@@ -519,10 +518,6 @@ impl App {
                     Focus::Peers => Focus::Log,
                     Focus::Log => Focus::Seed,
                 };
-                if self.focus == Focus::Log && self.log_list_state.selected().is_none() {
-                    let last = self.log_lines.len().saturating_sub(1);
-                    self.log_list_state.select(Some(last));
-                }
                 if self.focus == Focus::Peers
                     && self.peers_list_state.selected().is_none()
                     && !self.peers.is_empty()
@@ -551,6 +546,8 @@ impl App {
             KeyCode::Right if self.focus == Focus::Seed => {
                 self.seed_cursor = (self.seed_cursor + 1).min(self.seed_input.chars().count());
             }
+            KeyCode::Left if self.focus == Focus::Log => self.scroll_left(),
+            KeyCode::Right if self.focus == Focus::Log => self.scroll_right(),
 
             KeyCode::Up => self.scroll_by(-1),
             KeyCode::Down => self.scroll_by(1),
@@ -558,14 +555,15 @@ impl App {
             KeyCode::PageDown => self.scroll_by(10),
             KeyCode::End => {
                 if matches!(self.focus, Focus::Log) {
-                    let last = self.log_lines.len().saturating_sub(1);
-                    self.log_list_state.select(Some(last));
+                    self.log_scroll = self.log_lines.len().saturating_sub(1);
+                    self.log_col = 0;
                     self.log_follow = true;
                 }
             }
             KeyCode::Home => {
                 if matches!(self.focus, Focus::Log) {
-                    self.log_list_state.select(Some(0));
+                    self.log_scroll = 0;
+                    self.log_col = 0;
                     self.log_follow = false;
                 }
             }
@@ -719,10 +717,7 @@ impl App {
                                         .fg(Color::Magenta)
                                         .add_modifier(Modifier::BOLD),
                                 ),
-                                Span::styled(
-                                    " (you)",
-                                    Style::default().fg(Color::DarkGray),
-                                ),
+                                Span::styled(" (you)", Style::default().fg(Color::DarkGray)),
                             ]),
                             Line::from(vec![
                                 Span::styled("    overlay  ", Style::default().fg(Color::DarkGray)),
@@ -774,26 +769,48 @@ impl App {
     fn render_log(&mut self, f: &mut Frame, area: Rect) {
         let focused = self.focus == Focus::Log;
         let total = self.log_lines.len();
-        let selected = self
-            .log_list_state
-            .selected()
-            .unwrap_or(total.saturating_sub(1));
+
+        // Clamp scroll position.
+        if total == 0 {
+            self.log_scroll = 0;
+        } else {
+            self.log_scroll = self.log_scroll.min(total - 1);
+        }
+        let scroll_row = self.log_scroll;
+        let scroll_col = self.log_col;
 
         let follow_marker = if self.log_follow { " [follow]" } else { "" };
+        let col_marker = if scroll_col > 0 {
+            format!(" →{scroll_col}")
+        } else {
+            String::new()
+        };
         let title = if focused {
             format!(
-                " Log [{}/{}]{follow_marker} [↑↓ PgUp/Dn End] ",
-                selected + 1,
-                total
+                " Log [{}/{}]{follow_marker}{col_marker} [↑↓←→ PgUp/Dn End] ",
+                scroll_row + 1,
+                total.max(1)
             )
         } else {
-            format!(" Log [{}/{}]{follow_marker} ", selected + 1, total)
+            format!(
+                " Log [{}/{}]{follow_marker}{col_marker} ",
+                scroll_row + 1,
+                total.max(1)
+            )
         };
 
-        let items: Vec<ListItem> = self
+        // Inner width available for text (minus borders).
+        let inner_w = area.width.saturating_sub(2) as usize;
+
+        // Build visible lines: start from scroll_row, take as many as fit.
+        let visible_height = area.height.saturating_sub(2) as usize;
+        let lines: Vec<Line> = self
             .log_lines
             .iter()
-            .map(|l| {
+            .enumerate()
+            .skip(scroll_row)
+            .take(visible_height)
+            .map(|(idx, l)| {
                 let style = if l.contains("ERROR") || l.contains("error") {
                     Style::default().fg(Color::Red)
                 } else if l.contains("WARN") || l.contains("warn") {
@@ -805,28 +822,34 @@ impl App {
                 } else {
                     Style::default().fg(Color::White)
                 };
-                ListItem::new(Span::styled(l.as_str(), style))
+
+                // Horizontal slice: skip scroll_col chars, then take inner_w.
+                let chars: Vec<char> = l.chars().collect();
+                let visible: String = chars.iter().skip(scroll_col).take(inner_w).collect();
+
+                // Highlight the currently selected (top-visible) line.
+                let bg = if idx == scroll_row && focused {
+                    style.bg(Color::DarkGray)
+                } else {
+                    style
+                };
+                Line::from(Span::styled(visible, bg))
             })
             .collect();
 
-        self.log_list_state
-            .select(Some(selected.min(total.saturating_sub(1))));
+        let para = Paragraph::new(Text::from(lines)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(if focused {
+                    Style::default().fg(Color::Yellow)
+                } else {
+                    Style::default()
+                })
+                .title(title)
+                .title_style(Style::default().fg(Color::Yellow)),
+        );
 
-        let list = List::new(items)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(if focused {
-                        Style::default().fg(Color::Yellow)
-                    } else {
-                        Style::default()
-                    })
-                    .title(title)
-                    .title_style(Style::default().fg(Color::Yellow)),
-            )
-            .highlight_style(Style::default().bg(Color::DarkGray).fg(Color::White));
-
-        f.render_stateful_widget(list, area, &mut self.log_list_state);
+        f.render_widget(para, area);
     }
 }
 

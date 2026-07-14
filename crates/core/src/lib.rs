@@ -655,8 +655,8 @@ impl SeedNetEngine {
 
         let peers_file_handle = tokio::spawn(async move {
             // Write an initial snapshot with local info and no remote peers.
-            let _ = state_dir_evt
-                .write_peers_json(&format!(r#"{{"local":{local_json},"peers":[]}}"#));
+            let _ =
+                state_dir_evt.write_peers_json(&format!(r#"{{"local":{local_json},"peers":[]}}"#));
 
             loop {
                 match peer_events.recv().await {
