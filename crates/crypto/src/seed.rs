@@ -1,6 +1,6 @@
 //! Deriving network-wide values from a [`Seed`].
 
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use hkdf::Hkdf;
 use seednet_common::Seed;
@@ -20,7 +20,6 @@ use seednet_common::NOISE_PROLOGUE_LEN;
 pub fn derive_network_secret(seed: &Seed) -> NetworkSecret {
     let hk = Hkdf::<Sha256>::new(Some(PROTOCOL_MAGIC), seed.as_bytes());
     let mut okm = [0u8; NOISE_PROLOGUE_LEN];
-    // Unwrap is safe: 32 bytes is well under the HKDF limit (255*HashLen).
     hk.expand(b"seednet network secret v1", &mut okm)
         .expect("HKDF expand of 32 bytes cannot fail");
     NetworkSecret::from_bytes(okm)
@@ -50,7 +49,6 @@ pub fn derive_infohash(secret: &NetworkSecret) -> InfoHash {
 pub fn derive_overlay_addr(peer_id: &PeerId) -> OverlayAddr {
     let hash = blake3::hash(peer_id.as_bytes());
     let bytes = hash.as_bytes();
-    // Use bytes 0 and 8 to decorrelate the two octets.
     let octet3 = (u16::from(bytes[0]) % 254) as u8 + OVERLAY_HOST_RANGE_START; // 1..=254
     let octet4 = bytes[8];
     let ip = Ipv4Addr::new(
@@ -60,6 +58,36 @@ pub fn derive_overlay_addr(peer_id: &PeerId) -> OverlayAddr {
         octet4,
     );
     OverlayAddr::new(ip)
+}
+
+/// Derive a stable ULA IPv6 address from a device's public key.
+///
+/// Uses the `fd00::/8` Unique Local Address range.  The global ID (40 bits)
+/// and interface ID (64 bits) are both derived from BLAKE3 over the peer_id
+/// so the resulting `/48` prefix and host address are deterministic and unique
+/// per device.  Format: `fd<GG>:<GGGG>:<GGGG>:<ssss>:<IIII>:<IIII>:<IIII>:<IIII>`
+/// where G = global ID bytes, s = subnet (always 0001), I = interface ID.
+pub fn derive_overlay_ipv6(peer_id: &PeerId) -> Ipv6Addr {
+    // Use a distinct BLAKE3 context to keep IPv4 and IPv6 derivations independent.
+    let hash = blake3::keyed_hash(
+        b"seednet-overlay-ipv6-v1\0\0\0\0\0\0\0\0\0",
+        peer_id.as_bytes(),
+    );
+    let b = hash.as_bytes();
+
+    // ULA prefix 0xfd + 40-bit global ID from bytes [0..5]
+    let seg0 = u16::from_be_bytes([0xfd, b[0]]);
+    let seg1 = u16::from_be_bytes([b[1], b[2]]);
+    let seg2 = u16::from_be_bytes([b[3], b[4]]);
+    // Subnet ID: fixed 0x0001
+    let seg3: u16 = 0x0001;
+    // 64-bit interface ID from bytes [8..16]
+    let seg4 = u16::from_be_bytes([b[8], b[9]]);
+    let seg5 = u16::from_be_bytes([b[10], b[11]]);
+    let seg6 = u16::from_be_bytes([b[12], b[13]]);
+    let seg7 = u16::from_be_bytes([b[14], b[15]]);
+
+    Ipv6Addr::new(seg0, seg1, seg2, seg3, seg4, seg5, seg6, seg7)
 }
 
 #[cfg(test)]

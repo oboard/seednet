@@ -1,7 +1,6 @@
 //! Wire messages exchanged between SeedNet peers.
 //!
-//! Every message is serialized with `postcard` (compact, no-schema) and framed
-//! as `[u32 BE len][payload]` before hitting the UDP socket.
+//! Every message is serialized with `postcard` (compact, no-schema).
 
 use std::net::SocketAddr;
 
@@ -17,6 +16,10 @@ pub enum Message {
     SessionInit {
         peer_id: PeerId,
         overlay: OverlayAddr,
+        /// Deterministic ULA IPv6 address (`fd::/8`).
+        overlay_ipv6: Option<[u8; 16]>,
+        /// Hostname of the sending device (best-effort, may be empty).
+        hostname: String,
     },
 }
 

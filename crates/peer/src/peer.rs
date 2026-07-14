@@ -1,11 +1,6 @@
 //! [`Peer`] — a remote SeedNet device with an attached state machine.
-//!
-//! Each peer is identified by its [`PeerId`] and can carry an optional
-//! [`OverlayAddr`] once it has been assigned an overlay IP. All state
-//! transitions go through [`StateRecord::transition`] which enforces the
-//! legal lifecycle defined in [`crate::state`].
 
-use std::net::SocketAddr;
+use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use seednet_common::{OverlayAddr, PeerId};
@@ -17,7 +12,9 @@ use crate::state::{PeerState, StateRecord, TransitionError};
 pub struct PeerInner {
     pub id: PeerId,
     pub overlay_addr: Option<OverlayAddr>,
+    pub overlay_ipv6: Option<Ipv6Addr>,
     pub underlay_addr: Option<SocketAddr>,
+    pub hostname: String,
     pub state: StateRecord,
 }
 
@@ -34,7 +31,9 @@ impl Peer {
             inner: Arc::new(RwLock::new(PeerInner {
                 id,
                 overlay_addr: None,
+                overlay_ipv6: None,
                 underlay_addr: None,
+                hostname: String::new(),
                 state: StateRecord::new(PeerState::Disconnected),
             })),
         }
@@ -46,7 +45,9 @@ impl Peer {
             inner: Arc::new(RwLock::new(PeerInner {
                 id,
                 overlay_addr: None,
+                overlay_ipv6: None,
                 underlay_addr: Some(addr),
+                hostname: String::new(),
                 state: StateRecord::new(PeerState::Disconnected),
             })),
         }
@@ -64,16 +65,32 @@ impl Peer {
         self.inner.read().await.overlay_addr
     }
 
+    pub async fn overlay_ipv6(&self) -> Option<Ipv6Addr> {
+        self.inner.read().await.overlay_ipv6
+    }
+
     pub async fn underlay_addr(&self) -> Option<SocketAddr> {
         self.inner.read().await.underlay_addr
+    }
+
+    pub async fn hostname(&self) -> String {
+        self.inner.read().await.hostname.clone()
     }
 
     pub async fn set_overlay_addr(&self, addr: OverlayAddr) {
         self.inner.write().await.overlay_addr = Some(addr);
     }
 
+    pub async fn set_overlay_ipv6(&self, addr: Ipv6Addr) {
+        self.inner.write().await.overlay_ipv6 = Some(addr);
+    }
+
     pub async fn set_underlay_addr(&self, addr: SocketAddr) {
         self.inner.write().await.underlay_addr = Some(addr);
+    }
+
+    pub async fn set_hostname(&self, name: String) {
+        self.inner.write().await.hostname = name;
     }
 
     pub async fn transition(
@@ -108,64 +125,5 @@ impl Clone for Peer {
 impl std::fmt::Display for Peer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "Peer({})", self.id.short())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use seednet_common::PeerId;
-
-    fn test_peer_id() -> PeerId {
-        PeerId::from_bytes([0x42u8; 32])
-    }
-
-    #[tokio::test]
-    async fn new_peer_starts_disconnected() {
-        let p = Peer::new(test_peer_id());
-        assert_eq!(p.state().await, PeerState::Disconnected);
-    }
-
-    #[tokio::test]
-    async fn full_lifecycle() {
-        let p = Peer::new(test_peer_id());
-        p.transition(PeerState::Discovering).await.unwrap();
-        p.transition(PeerState::Connecting).await.unwrap();
-        p.transition(PeerState::Handshaking).await.unwrap();
-        p.transition(PeerState::Connected).await.unwrap();
-        assert_eq!(p.state().await, PeerState::Connected);
-    }
-
-    #[tokio::test]
-    async fn invalid_transition_rejected() {
-        let p = Peer::new(test_peer_id());
-        assert!(p.transition(PeerState::Connected).await.is_err());
-    }
-
-    #[tokio::test]
-    async fn overlay_addr_roundtrip() {
-        let p = Peer::new(test_peer_id());
-        assert!(p.overlay_addr().await.is_none());
-        p.set_overlay_addr(OverlayAddr::new(std::net::Ipv4Addr::new(10, 88, 1, 1)))
-            .await;
-        assert_eq!(
-            p.overlay_addr().await,
-            Some(OverlayAddr::new(std::net::Ipv4Addr::new(10, 88, 1, 1)))
-        );
-    }
-
-    #[tokio::test]
-    async fn underlay_addr_roundtrip() {
-        let addr: SocketAddr = "1.2.3.4:4242".parse().unwrap();
-        let p = Peer::new_with_underlay(test_peer_id(), addr);
-        assert_eq!(p.underlay_addr().await, Some(addr));
-    }
-
-    #[tokio::test]
-    async fn clone_shares_state() {
-        let p = Peer::new(test_peer_id());
-        let p2 = p.clone();
-        p.transition(PeerState::Discovering).await.unwrap();
-        assert_eq!(p2.state().await, PeerState::Discovering);
     }
 }

@@ -305,6 +305,8 @@ mod tests {
             Message::SessionInit {
                 peer_id: PeerId::from_bytes([0xab; 32]),
                 overlay: OverlayAddr::new(std::net::Ipv4Addr::new(10, 88, 1, 1)),
+                overlay_ipv6: None,
+                hostname: String::new(),
             },
         ];
         for msg in cases {

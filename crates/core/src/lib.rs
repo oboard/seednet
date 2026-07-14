@@ -8,7 +8,7 @@ use seednet_common::{Error, InfoHash, NetworkSecret, OVERLAY_MTU, OverlayAddr, P
 use seednet_config::StateDir;
 use seednet_crypto::{
     DeviceKeys, InitiatorHandshake, ResponderHandshake, SecureTransport, derive_infohash,
-    derive_network_secret, derive_overlay_addr,
+    derive_network_secret, derive_overlay_addr, derive_overlay_ipv6,
 };
 use seednet_dht::DhtDiscovery;
 use seednet_overlay::AllocationTable;
@@ -63,6 +63,7 @@ pub struct SeedNetEngine {
     device_keys: DeviceKeys,
     our_peer_id: PeerId,
     our_overlay: OverlayAddr,
+    our_overlay_ipv6: std::net::Ipv6Addr,
     peer_manager: Arc<PeerManager>,
     allocation_table: Arc<RwLock<AllocationTable>>,
     routing_table: Arc<RwLock<RoutingTable>>,
@@ -75,6 +76,7 @@ impl SeedNetEngine {
         let device_keys = config.state_dir.load_or_create_identity()?;
         let our_peer_id = device_keys.peer_id();
         let our_overlay = derive_overlay_addr(&our_peer_id);
+        let our_overlay_ipv6 = derive_overlay_ipv6(&our_peer_id);
 
         Ok(Self {
             config,
@@ -83,6 +85,7 @@ impl SeedNetEngine {
             device_keys,
             our_peer_id,
             our_overlay,
+            our_overlay_ipv6,
             peer_manager: Arc::new(PeerManager::new()),
             allocation_table: Arc::new(RwLock::new(AllocationTable::new())),
             routing_table: Arc::new(RwLock::new(RoutingTable::new())),
@@ -103,6 +106,10 @@ impl SeedNetEngine {
 
     pub fn our_overlay(&self) -> OverlayAddr {
         self.our_overlay
+    }
+
+    pub fn our_overlay_ipv6(&self) -> std::net::Ipv6Addr {
+        self.our_overlay_ipv6
     }
 
     pub fn device_keys(&self) -> &DeviceKeys {
@@ -141,20 +148,30 @@ impl SeedNetEngine {
             "SeedNet engine starting"
         );
 
+        // Prepare our SessionInit payload — sent once to each peer after handshake.
+        let our_hostname = local_hostname();
+        let our_session_init = seednet_peer::message::serialize_message(&Message::SessionInit {
+            peer_id: self.our_peer_id,
+            overlay: self.our_overlay,
+            overlay_ipv6: Some(self.our_overlay_ipv6.octets()),
+            hostname: our_hostname,
+        });
+
         let mut alloc_table = self.allocation_table.write().await;
         alloc_table.allocate(self.our_peer_id);
         drop(alloc_table);
 
-        let tun_config = TunConfig::new(self.our_overlay);
+        let tun_config = TunConfig::new(self.our_overlay).with_ipv6(self.our_overlay_ipv6);
         let tun_device = AsyncTunDevice::create(&tun_config)?;
         let tun_name = tun_device.name().to_string();
         let (tun_reader, tun_writer, _) = tun_device.into_split();
         let tun_writer = Arc::new(Mutex::new(tun_writer));
 
-        if let Err(e) = platform::configure_interface(
+        if let Err(e) = platform::configure_interface_full(
             &tun_name,
             self.our_overlay.ip(),
             subnet_mask(seednet_common::OVERLAY_SUBNET_PREFIX),
+            Some(&tun_config),
         )
         .await
         {
@@ -228,7 +245,10 @@ impl SeedNetEngine {
                             let peer_id = *peer_id;
                             drop(rt);
                             if let Some(mut session) = sessions_out.get_mut(&peer_id) {
-                                match session.transport.encrypt(packet) {
+                                let wrapped = seednet_peer::message::serialize_message(
+                                    &Message::Data(packet.to_vec()),
+                                );
+                                match session.transport.encrypt(&wrapped) {
                                     Ok(encrypted) => {
                                         let addr = session.underlay;
                                         drop(session);
@@ -262,6 +282,7 @@ impl SeedNetEngine {
         let device_keys_resp = self.device_keys.clone();
         let routing_table_in = self.routing_table.clone();
         let peer_mgr_in = self.peer_manager.clone();
+        let session_init_resp = our_session_init.clone();
 
         let inbound_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; MAX_DATAGRAM];
@@ -325,6 +346,14 @@ impl SeedNetEngine {
                                     rt.add_route(overlay, peer_id);
                                     drop(rt);
 
+                                    // Send our SessionInit so the peer learns our hostname + IPv6.
+                                    if let Some(mut session) = sessions_in.get_mut(&peer_id)
+                                        && let Ok(enc) =
+                                            session.transport.encrypt(&session_init_resp)
+                                    {
+                                        let _ = udp_in.send_to(&enc, from).await;
+                                    }
+
                                     let _peer = peer_mgr_in.discover(peer_id, from).await;
                                     let _ = peer_mgr_in
                                         .transition_peer(&peer_id, PeerState::Connecting)
@@ -366,13 +395,30 @@ impl SeedNetEngine {
                                                 let mut writer = tun_writer_in.lock().await;
                                                 let _ = writer.send(&payload).await;
                                             }
+                                            Ok(Message::SessionInit {
+                                                peer_id,
+                                                overlay_ipv6,
+                                                hostname,
+                                                ..
+                                            }) => {
+                                                if let Some(peer) = peer_mgr_in.get(&peer_id) {
+                                                    if let Some(bytes) = overlay_ipv6 {
+                                                        peer.set_overlay_ipv6(
+                                                            std::net::Ipv6Addr::from(bytes),
+                                                        )
+                                                        .await;
+                                                    }
+                                                    if !hostname.is_empty() {
+                                                        peer.set_hostname(hostname).await;
+                                                    }
+                                                }
+                                                tracing::debug!(target: "seednet", from = %from, "SessionInit received");
+                                            }
                                             Ok(msg) => {
                                                 tracing::debug!(target: "seednet", from = %from, ?msg, "unhandled message type");
                                             }
-                                            Err(_) => {
-                                                // Legacy: raw IPv4 packet not wrapped in Message.
-                                                let mut writer = tun_writer_in.lock().await;
-                                                let _ = writer.send(&decrypted).await;
+                                            Err(e) => {
+                                                tracing::debug!(target: "seednet", from = %from, error = %e, "malformed message, dropping");
                                             }
                                         }
                                     }
@@ -434,6 +480,7 @@ impl SeedNetEngine {
         let udp_dht = udp.clone();
         let sessions_dht = sessions.clone();
         let addr_index_dht = addr_index.clone();
+        let session_init_dht = our_session_init.clone();
         let pending_dht = pending_handshakes.clone();
         let routing_table_dht = self.routing_table.clone();
         let our_peer_id_dht = self.our_peer_id;
@@ -561,6 +608,14 @@ impl SeedNetEngine {
                                     rt.add_route(overlay, peer_id);
                                     drop(rt);
 
+                                    // Send our SessionInit so the peer learns our hostname + IPv6.
+                                    if let Some(mut session) = sessions_dht.get_mut(&peer_id)
+                                        && let Ok(enc) =
+                                            session.transport.encrypt(&session_init_dht)
+                                    {
+                                        let _ = udp_dht.send_to(&enc, addr).await;
+                                    }
+
                                     let _peer = peer_mgr_dht.discover(peer_id, addr).await;
                                     let _ = peer_mgr_dht
                                         .transition_peer(&peer_id, PeerState::Connecting)
@@ -642,19 +697,23 @@ impl SeedNetEngine {
         let state_dir_evt = self.config.state_dir.clone();
         let local_id = self.our_peer_id;
         let local_overlay = self.our_overlay;
+        let local_ipv6 = self.our_overlay_ipv6;
+        let local_hostname = local_hostname();
 
         let local_json = format!(
             concat!(
                 r#"{{"id":"{id}","id_short":"{short}","#,
-                r#""overlay":"{overlay}","underlay":""}}"#,
+                r#""overlay":"{overlay}","overlay_ipv6":"{ipv6}","#,
+                r#""hostname":"{hostname}","underlay":""}}"#,
             ),
             id = local_id,
             short = local_id.short(),
             overlay = local_overlay,
+            ipv6 = local_ipv6,
+            hostname = local_hostname,
         );
 
         let peers_file_handle = tokio::spawn(async move {
-            // Write an initial snapshot with local info and no remote peers.
             let _ =
                 state_dir_evt.write_peers_json(&format!(r#"{{"local":{local_json},"peers":[]}}"#));
 
@@ -665,7 +724,6 @@ impl SeedNetEngine {
                         ..
                     })
                     | Ok(PeerEvent::Removed { .. }) => {
-                        // Rebuild snapshot on every significant state change.
                         let connected = peer_mgr_evt.connected_peers().await;
                         let rt = routing_table_evt.read().await;
 
@@ -675,22 +733,34 @@ impl SeedNetEngine {
                                 .lookup_peer_ip(id)
                                 .map(|ip| ip.to_string())
                                 .unwrap_or_default();
-                            let underlay = if let Some(peer) = peer_mgr_evt.get(id) {
-                                peer.underlay_addr()
-                                    .await
-                                    .map(|a| a.to_string())
-                                    .unwrap_or_default()
-                            } else {
-                                String::new()
-                            };
+                            let (underlay, overlay_ipv6, hostname) =
+                                if let Some(peer) = peer_mgr_evt.get(id) {
+                                    let u = peer
+                                        .underlay_addr()
+                                        .await
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_default();
+                                    let v6 = peer
+                                        .overlay_ipv6()
+                                        .await
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_default();
+                                    let h = peer.hostname().await;
+                                    (u, v6, h)
+                                } else {
+                                    (String::new(), String::new(), String::new())
+                                };
                             entries.push(format!(
                                 concat!(
                                     r#"{{"id":"{id}","id_short":"{short}","#,
-                                    r#""overlay":"{overlay}","underlay":"{underlay}"}}"#,
+                                    r#""overlay":"{overlay}","overlay_ipv6":"{ipv6}","#,
+                                    r#""hostname":"{hostname}","underlay":"{underlay}"}}"#,
                                 ),
                                 id = id,
                                 short = id.short(),
                                 overlay = overlay,
+                                ipv6 = overlay_ipv6,
+                                hostname = hostname,
                                 underlay = underlay,
                             ));
                         }
@@ -728,6 +798,15 @@ impl SeedNetEngine {
 
         Ok(())
     }
+}
+
+fn local_hostname() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 pub fn print_status(engine: &SeedNetEngine) {

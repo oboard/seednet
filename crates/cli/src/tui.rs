@@ -55,7 +55,9 @@ enum DaemonState {
 struct Peer {
     id_short: String,
     overlay: String,
+    overlay_ipv6: String,
     underlay: String,
+    hostname: String,
     is_local: bool,
 }
 
@@ -299,7 +301,9 @@ impl App {
             Some(Peer {
                 id_short: p["id_short"].as_str()?.to_string(),
                 overlay: p["overlay"].as_str()?.to_string(),
+                overlay_ipv6: p["overlay_ipv6"].as_str().unwrap_or("").to_string(),
                 underlay: String::new(),
+                hostname: p["hostname"].as_str().unwrap_or("").to_string(),
                 is_local: true,
             })
         });
@@ -320,7 +324,9 @@ impl App {
                 Some(Peer {
                     id_short: p["id_short"].as_str()?.to_string(),
                     overlay: p["overlay"].as_str()?.to_string(),
+                    overlay_ipv6: p["overlay_ipv6"].as_str().unwrap_or("").to_string(),
                     underlay: p["underlay"].as_str()?.to_string(),
+                    hostname: p["hostname"].as_str().unwrap_or("").to_string(),
                     is_local: false,
                 })
             })
@@ -708,7 +714,7 @@ impl App {
                 .iter()
                 .map(|p| {
                     if p.is_local {
-                        ListItem::new(Text::from(vec![
+                        let mut lines = vec![
                             Line::from(vec![
                                 Span::styled("  ", Style::default()),
                                 Span::styled(
@@ -723,9 +729,22 @@ impl App {
                                 Span::styled("    overlay  ", Style::default().fg(Color::DarkGray)),
                                 Span::styled(&p.overlay, Style::default().fg(Color::Magenta)),
                             ]),
-                        ]))
+                        ];
+                        if !p.overlay_ipv6.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("    ipv6     ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(&p.overlay_ipv6, Style::default().fg(Color::Magenta)),
+                            ]));
+                        }
+                        if !p.hostname.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("    hostname ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(&p.hostname, Style::default().fg(Color::DarkGray)),
+                            ]));
+                        }
+                        ListItem::new(Text::from(lines))
                     } else {
-                        ListItem::new(Text::from(vec![
+                        let mut lines = vec![
                             Line::from(vec![
                                 Span::styled("  ", Style::default()),
                                 Span::styled(
@@ -734,16 +753,31 @@ impl App {
                                         .fg(Color::Cyan)
                                         .add_modifier(Modifier::BOLD),
                                 ),
+                                if p.hostname.is_empty() {
+                                    Span::raw("")
+                                } else {
+                                    Span::styled(
+                                        format!("  {}", p.hostname),
+                                        Style::default().fg(Color::White),
+                                    )
+                                },
                             ]),
                             Line::from(vec![
                                 Span::styled("    overlay  ", Style::default().fg(Color::DarkGray)),
                                 Span::styled(&p.overlay, Style::default().fg(Color::Green)),
                             ]),
-                            Line::from(vec![
-                                Span::styled("    underlay ", Style::default().fg(Color::DarkGray)),
-                                Span::styled(&p.underlay, Style::default().fg(Color::White)),
-                            ]),
-                        ]))
+                        ];
+                        if !p.overlay_ipv6.is_empty() {
+                            lines.push(Line::from(vec![
+                                Span::styled("    ipv6     ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(&p.overlay_ipv6, Style::default().fg(Color::Green)),
+                            ]));
+                        }
+                        lines.push(Line::from(vec![
+                            Span::styled("    underlay ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(&p.underlay, Style::default().fg(Color::White)),
+                        ]));
+                        ListItem::new(Text::from(lines))
                     }
                 })
                 .collect()

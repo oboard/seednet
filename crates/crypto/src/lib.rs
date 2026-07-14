@@ -23,7 +23,7 @@ pub use noise::{
     HandshakeResult, InitiatorHandshake, ResponderHandshake, SecureTransport,
     complete_handshake_pair,
 };
-pub use seed::{derive_infohash, derive_network_secret, derive_overlay_addr};
+pub use seed::{derive_infohash, derive_network_secret, derive_overlay_addr, derive_overlay_ipv6};
 
 /// Crypto-crate-local error alias. Forwards to [`seednet_common::Error`] so all
 /// crates in the workspace share a single error type.

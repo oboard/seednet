@@ -1,4 +1,4 @@
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
 use seednet_common::{
     Error, OVERLAY_MTU, OVERLAY_SUBNET_BASE, OVERLAY_SUBNET_PREFIX, OverlayAddr, Result,
@@ -7,6 +7,7 @@ use seednet_common::{
 #[derive(Clone, Debug)]
 pub struct TunConfig {
     pub overlay_addr: Ipv4Addr,
+    pub overlay_ipv6: Option<Ipv6Addr>,
     pub netmask: Ipv4Addr,
     pub mtu: usize,
     pub name: Option<String>,
@@ -16,10 +17,16 @@ impl TunConfig {
     pub fn new(overlay: OverlayAddr) -> Self {
         Self {
             overlay_addr: overlay.ip(),
+            overlay_ipv6: None,
             netmask: subnet_mask(OVERLAY_SUBNET_PREFIX),
             mtu: OVERLAY_MTU,
             name: None,
         }
+    }
+
+    pub fn with_ipv6(mut self, addr: Ipv6Addr) -> Self {
+        self.overlay_ipv6 = Some(addr);
+        self
     }
 
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
