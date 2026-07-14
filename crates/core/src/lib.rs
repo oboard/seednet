@@ -311,6 +311,14 @@ impl SeedNetEngine {
                                 }
                             } else {
                                 tracing::debug!(target: "seednet", peer = %peer_id.short(), "no session or relay for peer");
+                                // Remove stale route so routing table stays consistent.
+                                {
+                                    let mut rt = router_out.write().await;
+                                    if let Some(overlay) = rt.lookup_peer_ip(&peer_id) {
+                                        rt.remove_route(&seednet_common::OverlayAddr::new(overlay));
+                                        tracing::debug!(target: "seednet", peer = %peer_id.short(), "removed stale route");
+                                    }
+                                }
                                 // Request relay setup if we have a candidate.
                                 if let Some(relay_entry) = relay_candidates_out.iter().next() {
                                     let relay_id = *relay_entry.key();
@@ -724,6 +732,14 @@ impl SeedNetEngine {
                         tracing::info!(target: "seednet", count = peers.len(), "DHT lookup completed");
 
                         for addr in peers {
+                            // Skip our own public address (stale DHT record from a previous identity).
+                            if let Some(our_pub) = *stun_addr_dht.read().await
+                                && addr == our_pub
+                            {
+                                tracing::debug!(target: "seednet", addr = %addr, "skipping own public address");
+                                continue;
+                            }
+
                             // Only skip if we have BOTH an addr→peer mapping AND
                             // an active session. If the session dropped (heartbeat
                             // timeout, etc.) we must re-handshake.
