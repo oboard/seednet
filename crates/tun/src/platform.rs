@@ -8,13 +8,17 @@ pub async fn configure_interface(name: &str, ip: Ipv4Addr, netmask: Ipv4Addr) ->
     {
         let ip_str = ip.to_string();
         let netmask_str = netmask.to_string();
+        // On macOS point-to-point TUN the second address is the P2P destination.
+        // Using the subnet base (10.88.0.0) lets the kernel accept packets destined
+        // to any address in the overlay subnet, not just our own IP.
+        let dest_str = seednet_common::OVERLAY_SUBNET_BASE.to_string();
 
         // Set interface address.
         let output = tokio::process::Command::new("ifconfig")
             .args([
                 name,
                 &ip_str as &str,
-                &ip_str as &str,
+                &dest_str as &str,
                 "netmask",
                 &netmask_str as &str,
                 "up",
