@@ -36,6 +36,15 @@ pub async fn up(
     let exe = std::env::current_exe().context("could not determine current executable")?;
     let seed_str = String::from_utf8_lossy(seed.as_bytes()).into_owned();
 
+    // TUN creation requires root on macOS/Linux.
+    #[cfg(unix)]
+    if unsafe { libc_getuid() } != 0 {
+        anyhow::bail!(
+            "SeedNet requires root privileges to create a TUN interface.\n\
+             Please run: sudo seednet up"
+        );
+    }
+
     let log_path = state_dir.log_path();
     let log_file = std::fs::OpenOptions::new()
         .create(true)
@@ -492,6 +501,9 @@ fn signal_pid(pid: u32) -> Result<()> {
 unsafe extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: u32, sig: i32) -> i32;
+
+    #[link_name = "getuid"]
+    fn libc_getuid() -> u32;
 }
 
 fn process_alive(pid: u32) -> bool {
