@@ -15,6 +15,8 @@
 //!    │                    → Transport ←         │
 //! ```
 
+use std::collections::HashSet;
+
 use crate::device::DeviceKeys;
 use seednet_common::{Error, NetworkSecret};
 
@@ -29,12 +31,14 @@ const NONCE_LEN: usize = 8;
 /// Encrypted transport using `StatelessTransportState` (per-packet nonce).
 ///
 /// Each datagram carries its 8-byte LE nonce as a prefix, so dropped or
-/// reordered UDP packets never desynchronize the counter.
+/// reordered UDP packets never desynchronize the counter.  Received nonces
+/// are tracked in `seen_nonces` to reject replays.
 #[derive(Debug)]
 pub struct SecureTransport {
     state: snow::StatelessTransportState,
     remote_static: [u8; 32],
     send_nonce: u64,
+    seen_nonces: HashSet<u64>,
 }
 
 pub struct HandshakeResult {
@@ -81,6 +85,7 @@ fn into_transport(state: snow::HandshakeState) -> std::result::Result<SecureTran
         state: ts,
         remote_static: rs,
         send_nonce: 0,
+        seen_nonces: HashSet::new(),
     })
 }
 
@@ -209,6 +214,11 @@ impl SecureTransport {
             return Err(Error::NoiseTransport("datagram too short".into()));
         }
         let nonce = u64::from_le_bytes(datagram[..NONCE_LEN].try_into().unwrap());
+        if !self.seen_nonces.insert(nonce) {
+            return Err(Error::NoiseTransport(format!(
+                "replay detected: nonce {nonce} already used"
+            )));
+        }
         let ciphertext = &datagram[NONCE_LEN..];
         let mut buf = vec![0u8; ciphertext.len()];
         let n = self
