@@ -17,9 +17,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(unix)]
-use libc;
-
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyModifiers, MouseButton,
@@ -150,13 +147,13 @@ impl App {
         self.daemon = DaemonState::Starting;
 
         let pid_path = self.state_dir.join("seednet.pid");
-        if let Ok(s) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = s.trim().parse::<u32>() {
-                #[cfg(unix)]
-                libc_kill(pid, 15);
-                std::thread::sleep(std::time::Duration::from_millis(300));
-                let _ = std::fs::remove_file(&pid_path);
-            }
+        if let Ok(s) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = s.trim().parse::<u32>()
+        {
+            #[cfg(unix)]
+            libc_kill(pid, 15);
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let _ = std::fs::remove_file(&pid_path);
         }
 
         self.log_file_offset = std::fs::metadata(self.state_dir.join("seednet.log"))
@@ -218,12 +215,12 @@ impl App {
         self.daemon = DaemonState::Stopping;
 
         let pid_path = self.state_dir.join("seednet.pid");
-        if let Ok(s) = std::fs::read_to_string(&pid_path) {
-            if let Ok(pid) = s.trim().parse::<u32>() {
-                #[cfg(unix)]
-                libc_kill(pid, 15);
-                self.push_log(format!("Sent SIGTERM to pid {pid}"));
-            }
+        if let Ok(s) = std::fs::read_to_string(&pid_path)
+            && let Ok(pid) = s.trim().parse::<u32>()
+        {
+            #[cfg(unix)]
+            libc_kill(pid, 15);
+            self.push_log(format!("Sent SIGTERM to pid {pid}"));
         }
         if let Some(mut child) = self.daemon_child.take() {
             let _ = child.kill();
@@ -867,7 +864,7 @@ fn chrono_time() -> String {
             .as_secs() as libc::time_t;
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         unsafe { libc::localtime_r(&secs, &mut tm) };
-        return format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
+        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
     }
     #[cfg(not(unix))]
     {
