@@ -111,6 +111,7 @@ pub async fn configure_interface_full(
 
     #[cfg(target_os = "linux")]
     {
+        let _ = netmask;
         let output = tokio::process::Command::new("ip")
             .args(["link", "set", name, "up"])
             .output()
