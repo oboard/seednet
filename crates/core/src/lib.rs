@@ -724,11 +724,25 @@ impl SeedNetEngine {
                         tracing::info!(target: "seednet", count = peers.len(), "DHT lookup completed");
 
                         for addr in peers {
-                            let already_known = addr_index_dht.contains_key(&addr);
+                            // Only skip if we have BOTH an addr→peer mapping AND
+                            // an active session. If the session dropped (heartbeat
+                            // timeout, etc.) we must re-handshake.
+                            let already_connected = addr_index_dht
+                                .get(&addr)
+                                .map(|peer_id| sessions_dht.contains_key(&*peer_id))
+                                .unwrap_or(false);
 
-                            if already_known {
+                            if already_connected {
                                 tracing::debug!(target: "seednet", addr = %addr, "peer already connected, skipping");
                                 continue;
+                            }
+
+                            // Clean up stale addr_index entry if session is gone.
+                            if let Some(peer_id) = addr_index_dht.get(&addr).map(|r| *r)
+                                && !sessions_dht.contains_key(&peer_id)
+                            {
+                                addr_index_dht.remove(&addr);
+                                tracing::debug!(target: "seednet", addr = %addr, "cleaned stale addr_index entry, will re-handshake");
                             }
 
                             tracing::info!(target: "seednet", addr = %addr, "initiating handshake to discovered peer");
@@ -988,6 +1002,8 @@ impl SeedNetEngine {
         let peer_mgr_evt = self.peer_manager.clone();
         let state_dir_evt = self.config.state_dir.clone();
         let relay_paths_evt = relay_paths.clone();
+        let sessions_evt = sessions.clone();
+        let addr_index_evt = addr_index.clone();
         let local_id = self.our_peer_id;
         let local_overlay = self.our_overlay;
         let local_ipv6 = self.our_overlay_ipv6;
@@ -1015,11 +1031,13 @@ impl SeedNetEngine {
 
             loop {
                 match peer_events.recv().await {
-                    Ok(PeerEvent::StateChanged {
-                        to: PeerState::Connected,
-                        ..
-                    })
-                    | Ok(PeerEvent::Removed { .. }) => {
+                    Ok(PeerEvent::Removed { id }) => {
+                        // Clean up session and addr_index so DHT can re-handshake.
+                        if let Some((_, session)) = sessions_evt.remove(&id) {
+                            addr_index_evt.remove(&session.underlay);
+                            tracing::debug!(target: "seednet", peer = %id.short(), "session removed, addr_index cleaned");
+                        }
+                        // Rebuild peers.json snapshot.
                         let connected = peer_mgr_evt.connected_peers().await;
                         let rt = routing_table_evt.read().await;
 
@@ -1078,6 +1096,73 @@ impl SeedNetEngine {
                         }
                         drop(rt);
 
+                        let json = format!(
+                            r#"{{"local":{local_json},"peers":[{}]}}"#,
+                            entries.join(",")
+                        );
+                        let _ = state_dir_evt.write_peers_json(&json);
+                    }
+                    Ok(PeerEvent::StateChanged {
+                        to: PeerState::Connected,
+                        ..
+                    }) => {
+                        // Rebuild snapshot when a new peer connects.
+                        let connected = peer_mgr_evt.connected_peers().await;
+                        let rt = routing_table_evt.read().await;
+                        let mut entries = Vec::with_capacity(connected.len());
+                        for id in &connected {
+                            let overlay = rt
+                                .lookup_peer_ip(id)
+                                .map(|ip| ip.to_string())
+                                .unwrap_or_default();
+                            let (underlay, overlay_ipv6, hostname, public_addr_str) =
+                                if let Some(peer) = peer_mgr_evt.get(id) {
+                                    let u = peer
+                                        .underlay_addr()
+                                        .await
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_default();
+                                    let v6 = peer
+                                        .overlay_ipv6()
+                                        .await
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_default();
+                                    let h = peer.hostname().await;
+                                    let pa = peer
+                                        .public_addr()
+                                        .await
+                                        .map(|a| a.to_string())
+                                        .unwrap_or_default();
+                                    (u, v6, h, pa)
+                                } else {
+                                    (String::new(), String::new(), String::new(), String::new())
+                                };
+                            let (connection, relay_via) =
+                                if let Some(relay_id) = relay_paths_evt.get(id) {
+                                    ("relay", relay_id.short().to_string())
+                                } else {
+                                    ("direct", String::new())
+                                };
+                            entries.push(format!(
+                                concat!(
+                                    r#"{{"id":"{id}","id_short":"{short}","#,
+                                    r#""overlay":"{overlay}","overlay_ipv6":"{ipv6}","#,
+                                    r#""hostname":"{hostname}","public_addr":"{pub_addr}","#,
+                                    r#""connection":"{connection}","relay_via":"{relay_via}","#,
+                                    r#""underlay":"{underlay}"}}"#,
+                                ),
+                                id = id,
+                                short = id.short(),
+                                overlay = overlay,
+                                ipv6 = overlay_ipv6,
+                                hostname = hostname,
+                                pub_addr = public_addr_str,
+                                connection = connection,
+                                relay_via = relay_via,
+                                underlay = underlay,
+                            ));
+                        }
+                        drop(rt);
                         let json = format!(
                             r#"{{"local":{local_json},"peers":[{}]}}"#,
                             entries.join(",")
