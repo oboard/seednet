@@ -1,6 +1,7 @@
 //! CLI command implementations.
 
 use std::path::Path;
+#[cfg(not(target_os = "macos"))]
 use std::process::Stdio;
 
 use anyhow::{Context as _, Result};
@@ -32,104 +33,143 @@ pub async fn up(
         state_dir.clear_pid()?;
     }
 
-    // Spawn ourselves as `_daemon <seed> --port <port> [--state-dir <path>]`.
     let exe = std::env::current_exe().context("could not determine current executable")?;
     let seed_str = String::from_utf8_lossy(seed.as_bytes()).into_owned();
-
     let log_path = state_dir.log_path();
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .context("could not open daemon log file")?;
 
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("_daemon")
-        .arg(&seed_str)
-        .arg("--port")
-        .arg(port.to_string())
-        .arg("-v"); // always run daemon at INFO level so the log is useful
-
-    // Forward --state-dir only when it was explicitly set.
-    if let Some(dir) = explicit_state_dir {
-        cmd.arg("--state-dir").arg(dir);
-    }
-
-    // Detach stdin; redirect stdout+stderr to the log file so errors are
-    // captured and can be shown to the user if startup fails.
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(log_file);
-
-    // On Unix: put the daemon in its own process group so it is not killed
-    // when the user's shell session ends.
-    #[cfg(unix)]
+    // On macOS: install launchd service and let RunAtLoad start the daemon.
+    // This avoids having two daemon instances race for the port.
+    #[cfg(target_os = "macos")]
     {
-        use std::os::unix::process::CommandExt as _;
-        cmd.process_group(0);
-    }
+        // Remove any stale launchd service first (different seed/port).
+        let _ = remove_launchd();
 
-    let mut child = cmd.spawn().context("failed to launch SeedNet daemon")?;
+        install_launchd(
+            &exe,
+            &seed_str,
+            port,
+            state_dir.path(),
+            &log_path,
+            explicit_state_dir,
+        )
+        .context("install launchd service")?;
 
-    // Wait up to 5 s for the daemon to write its PID file.
-    // If the child process exits before writing the PID we know it crashed.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        // Non-blocking check: did the daemon already die?
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // Daemon exited before writing PID — it crashed.
+        // Wait up to 8 s for the daemon (started by launchd RunAtLoad) to write its PID.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            if let Some(pid) = state_dir.read_pid()?
+                && process_alive(pid)
+            {
+                break;
+            }
+            if std::time::Instant::now() > deadline {
                 let log_tail = read_log_tail(&log_path, 20);
                 anyhow::bail!(
-                    "SeedNet daemon exited immediately ({})\n\
-                     Log ({}):\n{}",
-                    status,
+                    "daemon did not start within 8 s\nLog ({}):\n{}",
                     log_path.display(),
                     log_tail,
                 );
             }
-            Ok(None) => {} // still running
-            Err(_) => {}   // can't check; proceed
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        if let Some(pid) = state_dir.read_pid()?
-            && process_alive(pid)
-        {
-            break; // daemon is up and healthy
-            // If PID was written but process already exited — it crashed right
-            // after writing the PID file.  Fall through so we pick up the
-            // child.try_wait() path on the next tick.
-        }
+        let pid = state_dir.read_pid()?.unwrap_or(0);
+        let keys = state_dir.load_or_create_identity()?;
+        let overlay = derive_overlay_addr(&keys.peer_id());
 
-        if std::time::Instant::now() > deadline {
-            let _ = child.kill();
-            let log_tail = read_log_tail(&log_path, 20);
-            anyhow::bail!(
-                "daemon did not start within 5 s\n\
-                 Log ({}):\n{}",
-                log_path.display(),
-                log_tail,
-            );
-        }
+        println!("SeedNet started  (pid {pid})");
+        println!("  overlay : {overlay}  (this device)");
+        println!("  port    : {port}");
+        println!("  log     : {}", log_path.display());
+        println!();
+        println!("  seednet list   — show connected peers");
+        println!("  seednet down   — stop");
+        println!("  boot    : installed (launchd fun.oboard.seednet)");
 
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        Ok(())
     }
 
-    let pid = state_dir.read_pid()?.unwrap_or(0);
+    // Non-macOS: spawn the daemon directly.
+    #[cfg(not(target_os = "macos"))]
+    {
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("could not open daemon log file")?;
 
-    // Derive the overlay address without touching the network.
-    let keys = state_dir.load_or_create_identity()?;
-    let overlay = derive_overlay_addr(&keys.peer_id());
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("_daemon")
+            .arg(&seed_str)
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("-v");
 
-    println!("SeedNet started  (pid {pid})");
-    println!("  overlay : {overlay}  (this device)");
-    println!("  port    : {port}");
-    println!("  log     : {}", log_path.display());
-    println!();
-    println!("  seednet list   — show connected peers");
-    println!("  seednet down   — stop");
+        if let Some(dir) = explicit_state_dir {
+            cmd.arg("--state-dir").arg(dir);
+        }
 
-    Ok(())
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(log_file);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt as _;
+            cmd.process_group(0);
+        }
+
+        let mut child = cmd.spawn().context("failed to launch SeedNet daemon")?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let log_tail = read_log_tail(&log_path, 20);
+                    anyhow::bail!(
+                        "SeedNet daemon exited immediately ({})\nLog ({}):\n{}",
+                        status,
+                        log_path.display(),
+                        log_tail,
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
+
+            if let Some(pid) = state_dir.read_pid()?
+                && process_alive(pid)
+            {
+                break;
+            }
+
+            if std::time::Instant::now() > deadline {
+                let _ = child.kill();
+                let log_tail = read_log_tail(&log_path, 20);
+                anyhow::bail!(
+                    "daemon did not start within 5 s\nLog ({}):\n{}",
+                    log_path.display(),
+                    log_tail,
+                );
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+
+        let pid = state_dir.read_pid()?.unwrap_or(0);
+        let keys = state_dir.load_or_create_identity()?;
+        let overlay = derive_overlay_addr(&keys.peer_id());
+
+        println!("SeedNet started  (pid {pid})");
+        println!("  overlay : {overlay}  (this device)");
+        println!("  port    : {port}");
+        println!("  log     : {}", log_path.display());
+        println!();
+        println!("  seednet list   — show connected peers");
+        println!("  seednet down   — stop");
+
+        Ok(())
+    } // end #[cfg(not(target_os = "macos"))]
 }
 
 // ---------------------------------------------------------------------------
@@ -163,6 +203,10 @@ pub async fn daemon(state_dir: &StateDir, seed: &Seed, port: u16) -> Result<()> 
 
 /// Stop the running daemon.
 pub async fn down(state_dir: &StateDir) -> Result<()> {
+    // Remove the boot service first so it doesn't restart the daemon we're about to stop.
+    #[cfg(target_os = "macos")]
+    let _ = remove_launchd();
+
     match state_dir.read_pid()? {
         Some(pid) if process_alive(pid) => {
             println!("Stopping SeedNet (pid {pid}) …");
@@ -534,4 +578,111 @@ fn process_alive(pid: u32) -> bool {
         let _ = pid;
         false
     }
+}
+
+// ---------------------------------------------------------------------------
+// launchd integration (macOS only)
+// ---------------------------------------------------------------------------
+
+const LAUNCHD_LABEL: &str = "fun.oboard.seednet";
+const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/fun.oboard.seednet.plist";
+
+#[cfg(target_os = "macos")]
+fn install_launchd(
+    exe: &std::path::Path,
+    seed_str: &str,
+    port: u16,
+    state_dir: &std::path::Path,
+    log_path: &std::path::Path,
+    explicit_state_dir: Option<&std::path::Path>,
+) -> Result<()> {
+    // Use the explicit state dir in the plist if provided, otherwise the default.
+    let state_dir_arg = explicit_state_dir.unwrap_or(state_dir);
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+    "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>{label}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{exe}</string>
+        <string>_daemon</string>
+        <string>{seed}</string>
+        <string>--port</string>
+        <string>{port}</string>
+        <string>-v</string>
+        <string>--state-dir</string>
+        <string>{state_dir_arg}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/dev/null</string>
+    <key>StandardErrorPath</key>
+    <string>{log}</string>
+</dict>
+</plist>
+"#,
+        label = LAUNCHD_LABEL,
+        exe = exe.display(),
+        seed = seed_str,
+        port = port,
+        state_dir_arg = state_dir_arg.display(),
+        log = log_path.display(),
+    );
+
+    std::fs::write(LAUNCHD_PLIST, plist.as_bytes())
+        .with_context(|| format!("write {LAUNCHD_PLIST}"))?;
+
+    // Modern macOS (Ventura+) uses `launchctl bootstrap system <plist>`.
+    // Fall back to legacy `launchctl load -w` if bootstrap fails.
+    let bootstrap_out = std::process::Command::new("launchctl")
+        .args(["bootstrap", "system", LAUNCHD_PLIST])
+        .output();
+    match bootstrap_out {
+        Ok(o) if o.status.success() => return Ok(()),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if stderr.contains("already") || stderr.contains("exists") {
+                return Ok(());
+            }
+            // bootstrap failed — try legacy load
+            let _ = o; // suppress warning
+        }
+        Err(_) => {} // launchctl not found? fall through
+    }
+    // Legacy fallback (older macOS)
+    let out = std::process::Command::new("launchctl")
+        .args(["load", "-w", LAUNCHD_PLIST])
+        .output()
+        .context("launchctl load")?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !stderr.to_lowercase().contains("already") {
+            anyhow::bail!("launchctl load: {stderr}");
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn remove_launchd() -> Result<()> {
+    let plist = std::path::Path::new(LAUNCHD_PLIST);
+    if !plist.exists() {
+        return Ok(());
+    }
+    // Try modern bootout first, then legacy unload.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootout", "system", LAUNCHD_PLIST])
+        .output();
+    let _ = std::process::Command::new("launchctl")
+        .args(["unload", "-w", LAUNCHD_PLIST])
+        .output();
+    let _ = std::fs::remove_file(plist);
+    Ok(())
 }
