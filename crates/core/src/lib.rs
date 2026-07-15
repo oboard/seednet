@@ -321,39 +321,67 @@ impl SeedNetEngine {
         tracing::info!(target: "seednet", port = bound_port, "UDP data socket bound");
 
         // Build MultiTransport with all enabled protocols.
+        // Each stream transport (TCP, WS) tries bound_port first, then
+        // increments until it finds a free port (up to +10).
         let mut builder = MultiTransport::builder().udp(udp_transport);
+        let mut next_stream_port = bound_port;
         for kind in &self.config.transports {
             match kind {
                 seednet_transport::TransportKind::Tcp => {
-                    match seednet_transport::TcpTransport::bind(std::net::SocketAddr::from((
-                        [0, 0, 0, 0],
-                        bound_port,
-                    )))
-                    .await
-                    {
-                        Ok(t) => {
-                            tracing::info!(target: "seednet", port = bound_port, "TCP listener bound");
-                            builder = builder.tcp(t);
+                    let mut bound = false;
+                    for offset in 0u16..10 {
+                        let try_port = next_stream_port.saturating_add(offset);
+                        match seednet_transport::TcpTransport::bind(std::net::SocketAddr::from((
+                            [0, 0, 0, 0],
+                            try_port,
+                        )))
+                        .await
+                        {
+                            Ok(t) => {
+                                tracing::info!(target: "seednet", port = try_port, "TCP listener bound");
+                                builder = builder.tcp(t);
+                                next_stream_port = try_port + 1;
+                                bound = true;
+                                break;
+                            }
+                            Err(_) if offset < 9 => continue,
+                            Err(e) => {
+                                tracing::warn!(target: "seednet", error = %e, "TCP bind failed after retries, skipping");
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(target: "seednet", error = %e, "TCP bind failed, skipping");
-                        }
+                    }
+                    if !bound {
+                        next_stream_port += 1;
                     }
                 }
-                seednet_transport::TransportKind::Ws => match seednet_transport::WsTransport::bind(
-                    std::net::SocketAddr::from(([0, 0, 0, 0], bound_port)),
-                )
-                .await
-                {
-                    Ok(t) => {
-                        tracing::info!(target: "seednet", port = bound_port, "WS listener bound");
-                        builder = builder.ws(t);
+                seednet_transport::TransportKind::Ws => {
+                    let mut bound = false;
+                    for offset in 0u16..10 {
+                        let try_port = next_stream_port.saturating_add(offset);
+                        match seednet_transport::WsTransport::bind(std::net::SocketAddr::from((
+                            [0, 0, 0, 0],
+                            try_port,
+                        )))
+                        .await
+                        {
+                            Ok(t) => {
+                                tracing::info!(target: "seednet", port = try_port, "WS listener bound");
+                                builder = builder.ws(t);
+                                next_stream_port = try_port + 1;
+                                bound = true;
+                                break;
+                            }
+                            Err(_) if offset < 9 => continue,
+                            Err(e) => {
+                                tracing::warn!(target: "seednet", error = %e, "WS bind failed after retries, skipping");
+                            }
+                        }
                     }
-                    Err(e) => {
-                        tracing::warn!(target: "seednet", error = %e, "WS bind failed, skipping");
+                    if !bound {
+                        next_stream_port += 1;
                     }
-                },
-                _ => {} // Udp already added; Wss not yet implemented
+                }
+                _ => {}
             }
         }
         let transport = Arc::new(builder.build());
