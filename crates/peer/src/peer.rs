@@ -77,6 +77,8 @@ impl Peer {
                 public_addr: None,
                 hostname: String::new(),
                 state: StateRecord::new(PeerState::Disconnected),
+                latency_ms: None,
+                path_kind: PathKind::Direct,
             })),
         }
     }
@@ -127,6 +129,22 @@ impl Peer {
 
     pub async fn set_public_addr(&self, addr: SocketAddr) {
         self.inner.write().await.public_addr = Some(addr);
+    }
+
+    pub async fn latency_ms(&self) -> Option<u32> {
+        self.inner.read().await.latency_ms
+    }
+
+    pub async fn set_latency_ms(&self, rtt: u32) {
+        self.inner.write().await.latency_ms = Some(rtt);
+    }
+
+    pub async fn path_kind(&self) -> PathKind {
+        self.inner.read().await.path_kind.clone()
+    }
+
+    pub async fn set_path_kind(&self, kind: PathKind) {
+        self.inner.write().await.path_kind = kind;
     }
 
     pub async fn transition(

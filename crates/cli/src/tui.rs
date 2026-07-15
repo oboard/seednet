@@ -57,6 +57,7 @@ struct Peer {
     hostname: String,
     connection: String, // "direct" or "relay"
     relay_via: String,
+    latency_ms: String,
     is_local: bool,
 }
 
@@ -345,6 +346,7 @@ impl App {
                 hostname: p["hostname"].as_str().unwrap_or("").to_string(),
                 connection: "direct".to_string(),
                 relay_via: String::new(),
+                latency_ms: String::new(),
                 is_local: true,
             })
         });
@@ -370,6 +372,7 @@ impl App {
                     hostname: p["hostname"].as_str().unwrap_or("").to_string(),
                     connection: p["connection"].as_str().unwrap_or("direct").to_string(),
                     relay_via: p["relay_via"].as_str().unwrap_or("").to_string(),
+                    latency_ms: p["latency_ms"].as_str().unwrap_or("").to_string(),
                     is_local: false,
                 })
             })
@@ -780,6 +783,20 @@ impl App {
                             Span::styled("    conn     ", Style::default().fg(Color::DarkGray)),
                             Span::styled(conn_label, Style::default().fg(conn_color)),
                         ]));
+                        if !p.latency_ms.is_empty() {
+                            let latency_color = match p.latency_ms.parse::<u32>().unwrap_or(999) {
+                                0..=30 => Color::Green,
+                                31..=100 => Color::Yellow,
+                                _ => Color::Red,
+                            };
+                            lines.push(Line::from(vec![
+                                Span::styled("    rtt      ", Style::default().fg(Color::DarkGray)),
+                                Span::styled(
+                                    format!("{}ms", p.latency_ms),
+                                    Style::default().fg(latency_color),
+                                ),
+                            ]));
+                        }
                         lines.push(Line::from(vec![
                             Span::styled("    underlay ", Style::default().fg(Color::DarkGray)),
                             Span::styled(&p.underlay, Style::default().fg(Color::White)),

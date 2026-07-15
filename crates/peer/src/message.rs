@@ -11,8 +11,15 @@ use serde::{Deserialize, Serialize};
 pub enum Message {
     Data(Vec<u8>),
     Heartbeat,
-    Ping,
-    Pong,
+    /// Latency probe; recipient echoes back with Pong.
+    Ping {
+        /// Milliseconds since Unix epoch at send time (for RTT calculation).
+        sent_ms: u64,
+    },
+    /// Response to Ping; echoes sent_ms so sender can compute RTT.
+    Pong {
+        sent_ms: u64,
+    },
     SessionInit {
         peer_id: PeerId,
         overlay: OverlayAddr,

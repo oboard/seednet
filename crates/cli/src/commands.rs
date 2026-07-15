@@ -373,15 +373,28 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
     let col_overlay = 16usize;
     let col_ipv6 = 40usize;
     let col_conn = 10usize;
+    let col_latency = 8usize;
     let col_underlay = 26usize;
 
     println!(
-        "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_conn$}  {:<col_underlay$}",
-        "PEER ID (hostname)", "OVERLAY IPv4", "OVERLAY IPv6", "CONN", "UNDERLAY ADDR"
+        "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_conn$}  {:<col_latency$}  {:<col_underlay$}",
+        "PEER ID (hostname)", "OVERLAY IPv4", "OVERLAY IPv6", "CONN", "RTT(ms)", "UNDERLAY ADDR"
     );
     println!(
         "{}",
-        "─".repeat(col_id + 2 + col_overlay + 2 + col_ipv6 + 2 + col_conn + 2 + col_underlay)
+        "─".repeat(
+            col_id
+                + 2
+                + col_overlay
+                + 2
+                + col_ipv6
+                + 2
+                + col_conn
+                + 2
+                + col_latency
+                + 2
+                + col_underlay
+        )
     );
 
     for p in peers {
@@ -391,6 +404,7 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
         let hostname = p["hostname"].as_str().unwrap_or("");
         let connection = p["connection"].as_str().unwrap_or("direct");
         let relay_via = p["relay_via"].as_str().unwrap_or("");
+        let latency = p["latency_ms"].as_str().unwrap_or("");
         let under = p["underlay"].as_str().unwrap_or("?");
         let display_id = if hostname.is_empty() {
             short.to_string()
@@ -402,9 +416,14 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
         } else {
             connection.to_string()
         };
+        let latency_display = if latency.is_empty() {
+            "-".to_string()
+        } else {
+            format!("{latency}ms")
+        };
         println!(
-            "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_conn$}  {:<col_underlay$}",
-            display_id, overlay, ipv6, conn_display, under
+            "{:<col_id$}  {:<col_overlay$}  {:<col_ipv6$}  {:<col_conn$}  {:<col_latency$}  {:<col_underlay$}",
+            display_id, overlay, ipv6, conn_display, latency_display, under
         );
     }
     println!();

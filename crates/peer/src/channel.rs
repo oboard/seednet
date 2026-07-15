@@ -300,8 +300,8 @@ mod tests {
         let cases = vec![
             Message::Data(vec![1, 2, 3]),
             Message::Heartbeat,
-            Message::Ping,
-            Message::Pong,
+            Message::Ping { sent_ms: 0 },
+            Message::Pong { sent_ms: 0 },
             Message::SessionInit {
                 peer_id: PeerId::from_bytes([0xab; 32]),
                 overlay: OverlayAddr::new(std::net::Ipv4Addr::new(10, 88, 1, 1)),

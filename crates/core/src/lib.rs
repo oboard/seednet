@@ -844,6 +844,44 @@ impl SeedNetEngine {
                                             Ok(Message::Heartbeat) => {
                                                 tracing::trace!(target: "seednet", from = %from, "heartbeat received");
                                             }
+                                            Ok(Message::Ping { sent_ms }) => {
+                                                // Echo back a Pong immediately.
+                                                let pong = seednet_peer::message::serialize_message(
+                                                    &Message::Pong { sent_ms },
+                                                );
+                                                let peer_id = addr_index_in.get(&from).map(|r| *r);
+                                                if let Some(pid) = peer_id
+                                                    && let Some(mut session) =
+                                                        sessions_in.get_mut(&pid)
+                                                    && let Ok(enc) =
+                                                        session.transport.encrypt(&pong)
+                                                {
+                                                    drop(session);
+                                                    let _ =
+                                                        udp_in.send_to(&enc, from.clone()).await;
+                                                }
+                                            }
+                                            Ok(Message::Pong { sent_ms }) => {
+                                                // Compute RTT and update peer latency.
+                                                let now_ms = std::time::SystemTime::now()
+                                                    .duration_since(std::time::UNIX_EPOCH)
+                                                    .unwrap_or_default()
+                                                    .as_millis()
+                                                    as u64;
+                                                let rtt = now_ms.saturating_sub(sent_ms) as u32;
+                                                let peer_id = addr_index_in.get(&from).map(|r| *r);
+                                                if let Some(pid) = peer_id
+                                                    && let Some(peer) = peer_mgr_in.get(&pid)
+                                                {
+                                                    peer.set_latency_ms(rtt).await;
+                                                    tracing::debug!(
+                                                        target: "seednet",
+                                                        peer = %pid.short(),
+                                                        rtt_ms = rtt,
+                                                        "pong received"
+                                                    );
+                                                }
+                                            }
                                             Ok(Message::Data(payload)) => {
                                                 let mut writer = tun_writer_in.lock().await;
                                                 let _ = writer.send(&payload).await;
@@ -1084,15 +1122,14 @@ impl SeedNetEngine {
                                                     // Try to decrypt with the sender's session.
                                                     let sender_id =
                                                         addr_index_in.get(&from).map(|r| *r);
-                                                    if let Some(sid) = sender_id {
-                                                        if let Some(mut session) =
+                                                    if let Some(sid) = sender_id
+                                                        && let Some(mut session) =
                                                             sessions_in.get_mut(&sid)
-                                                        {
-                                                            if let Ok(plain) =
-                                                                session.transport.decrypt(&payload)
-                                                            {
-                                                                drop(session);
-                                                                if let Ok(
+                                                        && let Ok(plain) =
+                                                            session.transport.decrypt(&payload)
+                                                    {
+                                                        drop(session);
+                                                        if let Ok(
                                                                     Message::Data(ip_pkt),
                                                                 ) = seednet_peer::message::deserialize_message(
                                                                     &plain,
@@ -1102,8 +1139,6 @@ impl SeedNetEngine {
                                                                     let _ = w.send(&ip_pkt).await;
                                                                     tracing::debug!(target: "seednet", bytes = ip_pkt.len(), "relayed packet written to TUN");
                                                                 }
-                                                            }
-                                                        }
                                                     }
                                                 } else if can_relay_in {
                                                     // We are the relay: decrypt from sender's session,
@@ -1119,34 +1154,27 @@ impl SeedNetEngine {
                                                     } else {
                                                         None
                                                     };
-                                                    if let Some(decrypted) = inner {
-                                                        if let Some(mut dst_session) =
+                                                    if let Some(decrypted) = inner
+                                                        && let Some(mut dst_session) =
                                                             sessions_in.get_mut(&dst_peer_id)
-                                                        {
-                                                            if let Ok(re_enc) = dst_session
-                                                                .transport
-                                                                .encrypt(&decrypted)
-                                                            {
-                                                                let fwd = seednet_peer::message::serialize_message(
+                                                        && let Ok(re_enc) = dst_session
+                                                            .transport
+                                                            .encrypt(&decrypted)
+                                                    {
+                                                        let fwd = seednet_peer::message::serialize_message(
                                                                     &Message::RelayData {
                                                                         dst_peer_id,
                                                                         payload: re_enc,
                                                                     },
                                                                 );
-                                                                if let Ok(outer) = dst_session
-                                                                    .transport
-                                                                    .encrypt(&fwd)
-                                                                {
-                                                                    let addr = dst_session
-                                                                        .underlay
-                                                                        .clone();
-                                                                    drop(dst_session);
-                                                                    let _ = udp_in
-                                                                        .send_to(&outer, addr)
-                                                                        .await;
-                                                                    tracing::debug!(target: "seednet", dst = %dst_peer_id.short(), "relayed packet forwarded (re-encrypted)");
-                                                                }
-                                                            }
+                                                        if let Ok(outer) =
+                                                            dst_session.transport.encrypt(&fwd)
+                                                        {
+                                                            let addr = dst_session.underlay.clone();
+                                                            drop(dst_session);
+                                                            let _ =
+                                                                udp_in.send_to(&outer, addr).await;
+                                                            tracing::debug!(target: "seednet", dst = %dst_peer_id.short(), "relayed packet forwarded (re-encrypted)");
                                                         }
                                                     }
                                                 }
@@ -1551,6 +1579,45 @@ impl SeedNetEngine {
             }
         });
 
+        // Health check: send Ping to every connected peer every 5s to measure RTT,
+        // then update path_kind (Direct vs Relay) based on what we have.
+        const HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(5);
+        let udp_hc = transport.clone();
+        let sessions_hc = sessions.clone();
+        let peer_mgr_hc = self.peer_manager.clone();
+        let relay_paths_hc = relay_paths.clone();
+
+        let healthcheck_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(HEALTHCHECK_INTERVAL);
+            loop {
+                interval.tick().await;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let ping =
+                    seednet_peer::message::serialize_message(&Message::Ping { sent_ms: now_ms });
+                for mut entry in sessions_hc.iter_mut() {
+                    let peer_id = *entry.key();
+                    let addr = entry.underlay.clone();
+                    if let Ok(enc) = entry.transport.encrypt(&ping) {
+                        drop(entry);
+                        let _ = udp_hc.send_to(&enc, addr).await;
+                    }
+                    // Update path_kind for this peer.
+                    if let Some(peer) = peer_mgr_hc.get(&peer_id) {
+                        let new_path = if relay_paths_hc.contains_key(&peer_id) {
+                            let relay_id = relay_paths_hc.get(&peer_id).map(|r| *r).unwrap();
+                            seednet_peer::PathKind::Relay(relay_id)
+                        } else {
+                            seednet_peer::PathKind::Direct
+                        };
+                        peer.set_path_kind(new_path).await;
+                    }
+                }
+            }
+        });
+
         // STUN refresh: re-query every DHT_ANNOUNCE_INTERVAL to detect NAT changes.
         let stun_addr_refresh = stun_public_addr.clone();
         let udp_stun = transport.clone();
@@ -1650,12 +1717,21 @@ impl SeedNetEngine {
                                 } else {
                                     ("direct", String::new())
                                 };
+                            let latency = if let Some(peer) = peer_mgr_evt.get(id) {
+                                peer.latency_ms()
+                                    .await
+                                    .map(|ms| ms.to_string())
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
                             entries.push(format!(
                                 concat!(
                                     r#"{{"id":"{id}","id_short":"{short}","#,
                                     r#""overlay":"{overlay}","overlay_ipv6":"{ipv6}","#,
                                     r#""hostname":"{hostname}","public_addr":"{pub_addr}","#,
                                     r#""connection":"{connection}","relay_via":"{relay_via}","#,
+                                    r#""latency_ms":"{latency}","#,
                                     r#""underlay":"{underlay}"}}"#,
                                 ),
                                 id = id,
@@ -1666,6 +1742,7 @@ impl SeedNetEngine {
                                 pub_addr = public_addr_str,
                                 connection = connection,
                                 relay_via = relay_via,
+                                latency = latency,
                                 underlay = underlay,
                             ));
                         }
@@ -1718,12 +1795,21 @@ impl SeedNetEngine {
                                 } else {
                                     ("direct", String::new())
                                 };
+                            let latency = if let Some(peer) = peer_mgr_evt.get(id) {
+                                peer.latency_ms()
+                                    .await
+                                    .map(|ms| ms.to_string())
+                                    .unwrap_or_default()
+                            } else {
+                                String::new()
+                            };
                             entries.push(format!(
                                 concat!(
                                     r#"{{"id":"{id}","id_short":"{short}","#,
                                     r#""overlay":"{overlay}","overlay_ipv6":"{ipv6}","#,
                                     r#""hostname":"{hostname}","public_addr":"{pub_addr}","#,
                                     r#""connection":"{connection}","relay_via":"{relay_via}","#,
+                                    r#""latency_ms":"{latency}","#,
                                     r#""underlay":"{underlay}"}}"#,
                                 ),
                                 id = id,
@@ -1734,6 +1820,7 @@ impl SeedNetEngine {
                                 pub_addr = public_addr_str,
                                 connection = connection,
                                 relay_via = relay_via,
+                                latency = latency,
                                 underlay = underlay,
                             ));
                         }
@@ -1764,6 +1851,7 @@ impl SeedNetEngine {
         discovery_handle.abort();
         announce_handle.abort();
         heartbeat_handle.abort();
+        healthcheck_handle.abort();
         stun_refresh_handle.abort();
         peers_file_handle.abort();
         // Clear the peers snapshot so stale data is not visible after restart.
