@@ -1794,12 +1794,11 @@ fn local_public_ip(port: u16) -> Option<SocketAddr> {
             .ok()?;
         let s = String::from_utf8(out.stdout).ok()?;
         for part in s.split_whitespace().collect::<Vec<_>>().windows(2) {
-            if part[0] == "src" {
-                if let Ok(ip) = part[1].parse::<std::net::Ipv4Addr>() {
-                    if is_publicly_routable(SocketAddr::from((ip, port))) {
-                        return Some(SocketAddr::from((ip, port)));
-                    }
-                }
+            if part[0] == "src"
+                && let Ok(ip) = part[1].parse::<std::net::Ipv4Addr>()
+                && is_publicly_routable(SocketAddr::from((ip, port)))
+            {
+                return Some(SocketAddr::from((ip, port)));
             }
         }
     }
