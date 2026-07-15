@@ -22,6 +22,7 @@ pub async fn up(
     seed: &Seed,
     port: u16,
     explicit_state_dir: Option<&Path>,
+    transports: Vec<seednet_transport::TransportKind>,
 ) -> Result<()> {
     // Already running?
     if let Some(pid) = state_dir.read_pid()? {
@@ -51,10 +52,17 @@ pub async fn up(
             .context("could not open daemon log file")?;
 
         let mut cmd = std::process::Command::new(&exe);
+        let transport_str = transports
+            .iter()
+            .map(|k| format!("{k:?}").to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(",");
         cmd.arg("_daemon")
             .arg(&seed_str)
             .arg("--port")
             .arg(port.to_string())
+            .arg("--transport")
+            .arg(&transport_str)
             .arg("-v")
             .arg("--state-dir")
             .arg(state_dir.path())
@@ -141,10 +149,17 @@ pub async fn up(
             .context("could not open daemon log file")?;
 
         let mut cmd = std::process::Command::new(&exe);
+        let transport_str = transports
+            .iter()
+            .map(|k| format!("{k:?}").to_ascii_lowercase())
+            .collect::<Vec<_>>()
+            .join(",");
         cmd.arg("_daemon")
             .arg(&seed_str)
             .arg("--port")
             .arg(port.to_string())
+            .arg("--transport")
+            .arg(&transport_str)
             .arg("-v");
 
         if let Some(dir) = explicit_state_dir {
@@ -220,8 +235,16 @@ pub async fn up(
 
 /// Run the engine in the foreground.  Invoked by `up`; not intended for
 /// direct use.
-pub async fn daemon(state_dir: &StateDir, seed: &Seed, port: u16) -> Result<()> {
-    let config = SeedNetConfig::new(seed.clone(), port, state_dir.clone());
+pub async fn daemon(
+    state_dir: &StateDir,
+    seed: &Seed,
+    port: u16,
+    transports: Vec<seednet_transport::TransportKind>,
+) -> Result<()> {
+    let mut config = SeedNetConfig::new(seed.clone(), port, state_dir.clone());
+    if !transports.is_empty() {
+        config.transports = transports;
+    }
     let engine = SeedNetEngine::new(config)?;
 
     // Write PID *before* starting network I/O so that `up` can detect us.

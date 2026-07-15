@@ -17,6 +17,7 @@ seednet-crypto = { workspace = true }
 seednet-config = { workspace = true }
 seednet-dht = { workspace = true }
 seednet-core = { workspace = true }
+seednet-transport = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

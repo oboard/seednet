@@ -9,6 +9,7 @@ members = [
     "crates/tun",
     "crates/overlay",
     "crates/routing",
+    "crates/transport",
     "crates/core",
     "crates/nat",
     "crates/integration-tests",
@@ -33,6 +34,7 @@ seednet-peer = { path = "crates/peer" }
 seednet-tun = { path = "crates/tun" }
 seednet-overlay = { path = "crates/overlay" }
 seednet-routing = { path = "crates/routing" }
+seednet-transport = { path = "crates/transport" }
 seednet-core = { path = "crates/core" }
 
 # Core async runtime
@@ -61,6 +63,9 @@ mainline = { version = "7.0", default-features = false, features = ["async"] }
 tun = { version = "0.8", features = ["async", "tokio"] }
 futures-lite = "2"
 futures = "0.3"
+bytes = "1"
+async-trait = "0.1"
+tokio-tungstenite = { version = "0.24" }
 
 # CLI / diagnostics
 clap = { version = "4.6", features = ["derive", "env"] }

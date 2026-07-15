@@ -22,6 +22,7 @@ use seednet_tun::{AsyncTunDevice, TunConfig, platform};
 
 use rand::Rng as _;
 
+use seednet_transport::{MultiTransport, Transport, TransportAddr, UdpTransport};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 
@@ -29,8 +30,6 @@ const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-const MAX_DATAGRAM: usize = OVERLAY_MTU + 256;
-
 const NOISE_HANDSHAKE_INITIATOR_PREFIX: &[u8] = b"seednet-hs-a";
 const NOISE_HANDSHAKE_RESPONDER_PREFIX: &[u8] = b"seednet-hs-b";
 
@@ -42,13 +41,15 @@ const NOISE_HANDSHAKE_RESPONDER_PREFIX: &[u8] = b"seednet-hs-b";
 /// peer are now co-located, eliminating multi-lock acquisition sequences.
 struct PeerSession {
     transport: SecureTransport,
-    underlay: SocketAddr,
+    underlay: TransportAddr,
 }
 
 pub struct SeedNetConfig {
     pub seed: Seed,
     pub port: u16,
     pub state_dir: StateDir,
+    /// Which transport protocols to enable. Defaults to UDP-only.
+    pub transports: Vec<seednet_transport::TransportKind>,
 }
 
 impl SeedNetConfig {
@@ -57,6 +58,11 @@ impl SeedNetConfig {
             seed,
             port,
             state_dir,
+            transports: vec![
+                seednet_transport::TransportKind::Udp,
+                seednet_transport::TransportKind::Tcp,
+                seednet_transport::TransportKind::Ws,
+            ],
         }
     }
 }
@@ -208,14 +214,55 @@ impl SeedNetEngine {
             }
             bound.ok_or_else(|| Error::Io(last_err.unwrap()))?
         };
-        let bound_port = udp_socket.local_addr().map(|a| a.port()).unwrap_or(port);
+        let udp_transport = UdpTransport::new(Arc::new(udp_socket));
+        let bound_port = udp_transport.local_addr().socket_addr().port();
         tracing::info!(target: "seednet", port = bound_port, "UDP data socket bound");
 
-        // STUN: discover our public address.  Non-fatal — we continue without it.
-        let public_addr_init =
-            seednet_nat::stun::query_public_addr_with_fallback(&udp_socket, STUN_SERVERS)
+        // Build MultiTransport with all enabled protocols.
+        let mut builder = MultiTransport::builder().udp(udp_transport);
+        for kind in &self.config.transports {
+            match kind {
+                seednet_transport::TransportKind::Tcp => {
+                    match seednet_transport::TcpTransport::bind(std::net::SocketAddr::from((
+                        [0, 0, 0, 0],
+                        bound_port,
+                    )))
+                    .await
+                    {
+                        Ok(t) => {
+                            tracing::info!(target: "seednet", port = bound_port, "TCP listener bound");
+                            builder = builder.tcp(t);
+                        }
+                        Err(e) => {
+                            tracing::warn!(target: "seednet", error = %e, "TCP bind failed, skipping");
+                        }
+                    }
+                }
+                seednet_transport::TransportKind::Ws => match seednet_transport::WsTransport::bind(
+                    std::net::SocketAddr::from(([0, 0, 0, 0], bound_port)),
+                )
                 .await
-                .ok();
+                {
+                    Ok(t) => {
+                        tracing::info!(target: "seednet", port = bound_port, "WS listener bound");
+                        builder = builder.ws(t);
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "seednet", error = %e, "WS bind failed, skipping");
+                    }
+                },
+                _ => {} // Udp already added; Wss not yet implemented
+            }
+        }
+        let transport = Arc::new(builder.build());
+
+        // STUN: discover our public address.  Non-fatal — we continue without it.
+        let public_addr_init = seednet_nat::stun::query_public_addr_with_fallback(
+            transport.udp().unwrap().inner(),
+            STUN_SERVERS,
+        )
+        .await
+        .ok();
         let can_relay = public_addr_init.map(is_publicly_routable).unwrap_or(false);
         if let Some(addr) = public_addr_init {
             tracing::info!(target: "seednet", public_addr = %addr, can_relay, "public address discovered");
@@ -228,8 +275,8 @@ impl SeedNetEngine {
         // Single DashMap keyed by PeerId; eliminates three separate RwLock<HashMap>
         // and the multi-lock acquisition patterns they required.
         let sessions: Arc<DashMap<PeerId, PeerSession>> = Arc::new(DashMap::new());
-        // Reverse index: SocketAddr → PeerId, for O(1) inbound dispatch.
-        let addr_index: Arc<DashMap<SocketAddr, PeerId>> = Arc::new(DashMap::new());
+        // Reverse index: TransportAddr → PeerId, for O(1) inbound dispatch.
+        let addr_index: Arc<DashMap<TransportAddr, PeerId>> = Arc::new(DashMap::new());
         let pending_handshakes: Arc<
             RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>,
         > = Arc::new(RwLock::new(HashMap::new()));
@@ -256,8 +303,6 @@ impl SeedNetEngine {
             tracing::info!(target: "seednet", port = announce_port, "Announced on DHT");
         }
 
-        let udp = Arc::new(udp_socket);
-
         // relay_candidates: relay_peer_id → underlay SocketAddr
         let relay_candidates: Arc<DashMap<PeerId, SocketAddr>> = Arc::new(DashMap::new());
         // relay_paths: dst_peer_id → relay_peer_id
@@ -265,7 +310,7 @@ impl SeedNetEngine {
 
         let router_out = self.routing_table.clone();
         let sessions_out = sessions.clone();
-        let udp_out = udp.clone();
+        let udp_out = transport.clone();
         let our_overlay_out = self.our_overlay;
         let tun_writer_out = tun_writer.clone();
         let relay_candidates_out = relay_candidates.clone();
@@ -302,7 +347,7 @@ impl SeedNetEngine {
                                 );
                                 match session.transport.encrypt(&wrapped) {
                                     Ok(encrypted) => {
-                                        let addr = session.underlay;
+                                        let addr = session.underlay.clone();
                                         drop(session);
                                         let _ = udp_out.send_to(&encrypted, addr).await;
                                     }
@@ -329,7 +374,7 @@ impl SeedNetEngine {
                                         if let Ok(outer_enc) =
                                             relay_session.transport.encrypt(&relay_pkt)
                                         {
-                                            let addr = relay_session.underlay;
+                                            let addr = relay_session.underlay.clone();
                                             drop(relay_session);
                                             let _ = udp_out.send_to(&outer_enc, addr).await;
                                         }
@@ -356,7 +401,7 @@ impl SeedNetEngine {
                                             },
                                         );
                                         if let Ok(enc) = relay_session.transport.encrypt(&req) {
-                                            let addr = relay_session.underlay;
+                                            let addr = relay_session.underlay.clone();
                                             drop(relay_session);
                                             let _ = udp_out.send_to(&enc, addr).await;
                                             tracing::info!(target: "seednet", peer = %peer_id.short(), relay = %relay_id.short(), "requested relay");
@@ -377,7 +422,7 @@ impl SeedNetEngine {
         });
 
         let tun_writer_in = tun_writer.clone();
-        let udp_in = udp.clone();
+        let udp_in = transport.clone();
         let sessions_in = sessions.clone();
         let addr_index_in = addr_index.clone();
         let pending_in = pending_handshakes.clone();
@@ -396,7 +441,6 @@ impl SeedNetEngine {
         let can_relay_in = can_relay;
 
         let inbound_handle = tokio::spawn(async move {
-            let mut buf = vec![0u8; MAX_DATAGRAM];
             // State machine for concurrent responder-side handshakes.
             // Keyed by peer SocketAddr; value is the half-completed ResponderHandshake
             // (after msg A read + msg B sent) waiting for msg C. Entries older than
@@ -407,9 +451,9 @@ impl SeedNetEngine {
             > = HashMap::new();
 
             loop {
-                match udp_in.recv_from(&mut buf).await {
-                    Ok((n, from)) => {
-                        let data = buf[..n].to_vec();
+                match udp_in.recv_from().await {
+                    Ok((data, from)) => {
+                        let from_sa = from.socket_addr();
 
                         // Evict stale half-open responder handshakes.
                         pending_responders.retain(|_, (_, t)| t.elapsed() < HANDSHAKE_TIMEOUT);
@@ -434,8 +478,8 @@ impl SeedNetEngine {
                                         ),
                                     ]
                                     .concat();
-                                    let _ = udp_in.send_to(&ack, from).await;
-                                    let _ = udp_in.send_to(&probe, from).await;
+                                    let _ = udp_in.send_to(&ack, from.clone()).await;
+                                    let _ = udp_in.send_to(&probe, from.clone()).await;
                                 }
                                 Ok(Message::HolePunchAck { token }) => {
                                     tracing::debug!(target: "seednet", from = %from, token, "hole-punch ack received");
@@ -448,10 +492,10 @@ impl SeedNetEngine {
                         // --- msg B dispatch: initiator side waiting on a oneshot ---
                         if data.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
                             let mut pending = pending_in.write().await;
-                            if let Some(sender) = pending.remove(&from) {
+                            if let Some(sender) = pending.remove(&from_sa) {
                                 drop(pending);
                                 tracing::debug!(target: "seednet", from = %from, "dispatching msg B to pending initiator");
-                                let _ = sender.send(data);
+                                let _ = sender.send(data.to_vec());
                                 continue;
                             }
                             drop(pending);
@@ -459,7 +503,7 @@ impl SeedNetEngine {
                         }
 
                         // --- msg C: complete a pending responder handshake ---
-                        if let Some((responder, _)) = pending_responders.remove(&from) {
+                        if let Some((responder, _)) = pending_responders.remove(&from_sa) {
                             // Ignore anything that looks like a new handshake msg A/B here;
                             // treat it as msg C (will fail to decrypt and be discarded).
                             match responder.finish(&data) {
@@ -478,10 +522,10 @@ impl SeedNetEngine {
                                         peer_id,
                                         PeerSession {
                                             transport: resp_result.transport,
-                                            underlay: from,
+                                            underlay: from.clone(),
                                         },
                                     );
-                                    addr_index_in.insert(from, peer_id);
+                                    addr_index_in.insert(from.clone(), peer_id);
 
                                     let overlay = derive_overlay_addr(&peer_id);
                                     let mut rt = routing_table_in.write().await;
@@ -502,7 +546,7 @@ impl SeedNetEngine {
                                     if let Some(mut session) = sessions_in.get_mut(&peer_id)
                                         && let Ok(enc) = session.transport.encrypt(&si_bytes)
                                     {
-                                        let _ = udp_in.send_to(&enc, from).await;
+                                        let _ = udp_in.send_to(&enc, from.clone()).await;
                                     }
 
                                     // If we can relay, advertise ourselves.
@@ -518,11 +562,11 @@ impl SeedNetEngine {
                                         if let Some(mut session) = sessions_in.get_mut(&peer_id)
                                             && let Ok(enc) = session.transport.encrypt(&announce)
                                         {
-                                            let _ = udp_in.send_to(&enc, from).await;
+                                            let _ = udp_in.send_to(&enc, from.clone()).await;
                                         }
                                     }
 
-                                    let _peer = peer_mgr_in.discover(peer_id, from).await;
+                                    let _peer = peer_mgr_in.discover(peer_id, from_sa).await;
                                     let _ = peer_mgr_in
                                         .transition_peer(&peer_id, PeerState::Connecting)
                                         .await;
@@ -586,7 +630,7 @@ impl SeedNetEngine {
                                                     {
                                                         sessions_in.insert(peer_id, session);
                                                     }
-                                                    addr_index_in.insert(from, peer_id);
+                                                    addr_index_in.insert(from.clone(), peer_id);
                                                     // Remove stale X25519-derived route.
                                                     let stale = derive_overlay_addr(&old_id);
                                                     let mut rt = routing_table_in.write().await;
@@ -645,7 +689,8 @@ impl SeedNetEngine {
                                                             if let Ok(enc) =
                                                                 dst_session.transport.encrypt(&fwd)
                                                             {
-                                                                let addr = dst_session.underlay;
+                                                                let addr =
+                                                                    dst_session.underlay.clone();
                                                                 drop(dst_session);
                                                                 let _ = udp_in
                                                                     .send_to(&enc, addr)
@@ -663,7 +708,8 @@ impl SeedNetEngine {
                                                                 .transport
                                                                 .encrypt(&ready)
                                                             {
-                                                                let addr = req_session.underlay;
+                                                                let addr =
+                                                                    req_session.underlay.clone();
                                                                 drop(req_session);
                                                                 let _ = udp_in
                                                                     .send_to(&enc, addr)
@@ -696,7 +742,7 @@ impl SeedNetEngine {
                                                     if let Some(dst_session) =
                                                         sessions_in.get(&dst_peer_id)
                                                     {
-                                                        let addr = dst_session.underlay;
+                                                        let addr = dst_session.underlay.clone();
                                                         drop(dst_session);
                                                         let _ =
                                                             udp_in.send_to(&payload, addr).await;
@@ -734,12 +780,12 @@ impl SeedNetEngine {
                                                 tagged.extend_from_slice(&msg_b);
 
                                                 tracing::info!(target: "seednet", from = %from, "received handshake msg A, sending msg B");
-                                                let _ = udp_in.send_to(&tagged, from).await;
+                                                let _ = udp_in.send_to(&tagged, from.clone()).await;
 
                                                 // Park the half-completed handshake; msg C will
                                                 // arrive in a future iteration of this loop.
                                                 pending_responders.insert(
-                                                    from,
+                                                    from_sa,
                                                     (responder, std::time::Instant::now()),
                                                 );
                                             }
@@ -767,7 +813,7 @@ impl SeedNetEngine {
         let peer_mgr_dht = self.peer_manager.clone();
         let network_secret_dht = self.network_secret;
         let device_keys_dht = self.device_keys.clone();
-        let udp_dht = udp.clone();
+        let udp_dht = transport.clone();
         let sessions_dht = sessions.clone();
         let addr_index_dht = addr_index.clone();
         let stun_addr_dht = stun_public_addr.clone();
@@ -805,7 +851,7 @@ impl SeedNetEngine {
                             // an active session. If the session dropped (heartbeat
                             // timeout, etc.) we must re-handshake.
                             let already_connected = addr_index_dht
-                                .get(&addr)
+                                .get(&TransportAddr::Udp(addr))
                                 .map(|peer_id| sessions_dht.contains_key(&*peer_id))
                                 .unwrap_or(false);
 
@@ -815,10 +861,11 @@ impl SeedNetEngine {
                             }
 
                             // Clean up stale addr_index entry if session is gone.
-                            if let Some(peer_id) = addr_index_dht.get(&addr).map(|r| *r)
+                            if let Some(peer_id) =
+                                addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r)
                                 && !sessions_dht.contains_key(&peer_id)
                             {
-                                addr_index_dht.remove(&addr);
+                                addr_index_dht.remove(&TransportAddr::Udp(addr));
                                 tracing::debug!(target: "seednet", addr = %addr, "cleaned stale addr_index entry, will re-handshake");
                             }
 
@@ -860,7 +907,9 @@ impl SeedNetEngine {
                                 pending.insert(addr, tx);
                             }
 
-                            if let Err(e) = udp_dht.send_to(&tagged_a, addr).await {
+                            if let Err(e) =
+                                udp_dht.send_to(&tagged_a, TransportAddr::Udp(addr)).await
+                            {
                                 let mut pending = pending_dht.write().await;
                                 pending.remove(&addr);
                                 tracing::warn!(target: "seednet", error = %e, "send msg A failed");
@@ -891,8 +940,9 @@ impl SeedNetEngine {
                                         }
                                     };
 
-                                    if let Err(e) =
-                                        udp_dht.send_to(&init_result.msg_bytes, addr).await
+                                    if let Err(e) = udp_dht
+                                        .send_to(&init_result.msg_bytes, TransportAddr::Udp(addr))
+                                        .await
                                     {
                                         tracing::warn!(target: "seednet", error = %e, "send msg C failed");
                                         continue;
@@ -917,10 +967,10 @@ impl SeedNetEngine {
                                         peer_id,
                                         PeerSession {
                                             transport: init_result.transport,
-                                            underlay: addr,
+                                            underlay: TransportAddr::Udp(addr),
                                         },
                                     );
-                                    addr_index_dht.insert(addr, peer_id);
+                                    addr_index_dht.insert(TransportAddr::Udp(addr), peer_id);
 
                                     let overlay = derive_overlay_addr(&peer_id);
                                     let mut rt = routing_table_dht.write().await;
@@ -941,7 +991,8 @@ impl SeedNetEngine {
                                     if let Some(mut session) = sessions_dht.get_mut(&peer_id)
                                         && let Ok(enc) = session.transport.encrypt(&si_bytes)
                                     {
-                                        let _ = udp_dht.send_to(&enc, addr).await;
+                                        let _ =
+                                            udp_dht.send_to(&enc, TransportAddr::Udp(addr)).await;
                                     }
 
                                     // Advertise relay capability if applicable.
@@ -957,7 +1008,9 @@ impl SeedNetEngine {
                                         if let Some(mut session) = sessions_dht.get_mut(&peer_id)
                                             && let Ok(enc) = session.transport.encrypt(&announce)
                                         {
-                                            let _ = udp_dht.send_to(&enc, addr).await;
+                                            let _ = udp_dht
+                                                .send_to(&enc, TransportAddr::Udp(addr))
+                                                .await;
                                         }
                                     }
 
@@ -994,7 +1047,8 @@ impl SeedNetEngine {
                                     drop(pending);
 
                                     // If we know the peer's STUN public addr, attempt hole-punch.
-                                    let peer_id_candidate = addr_index_dht.get(&addr).map(|r| *r);
+                                    let peer_id_candidate =
+                                        addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r);
                                     if let Some(pid) = peer_id_candidate
                                         && let Some(peer) = peer_mgr_dht.get(&pid)
                                         && let Some(pub_addr) = peer.public_addr().await
@@ -1009,7 +1063,9 @@ impl SeedNetEngine {
                                             ),
                                         ]
                                         .concat();
-                                        let _ = udp_dht.send_to(&probe, pub_addr).await;
+                                        let _ = udp_dht
+                                            .send_to(&probe, TransportAddr::Udp(pub_addr))
+                                            .await;
                                         tokio::time::sleep(Duration::from_millis(300)).await;
                                     }
                                 }
@@ -1039,7 +1095,7 @@ impl SeedNetEngine {
             }
         });
 
-        let udp_hb = udp.clone();
+        let udp_hb = transport.clone();
         let sessions_hb = sessions.clone();
 
         let heartbeat_handle = tokio::spawn(async move {
@@ -1048,7 +1104,7 @@ impl SeedNetEngine {
             loop {
                 interval.tick().await;
                 for mut entry in sessions_hb.iter_mut() {
-                    let addr = entry.underlay;
+                    let addr = entry.underlay.clone();
                     match entry.transport.encrypt(&heartbeat_payload) {
                         Ok(encrypted) => {
                             let _ = udp_hb.send_to(&encrypted, addr).await;
@@ -1063,15 +1119,17 @@ impl SeedNetEngine {
 
         // STUN refresh: re-query every DHT_ANNOUNCE_INTERVAL to detect NAT changes.
         let stun_addr_refresh = stun_public_addr.clone();
-        let udp_stun = udp.clone();
+        let udp_stun = transport.clone();
         let stun_refresh_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(DHT_ANNOUNCE_INTERVAL);
             interval.tick().await; // skip first tick (already queried at startup)
             loop {
                 interval.tick().await;
-                if let Ok(addr) =
-                    seednet_nat::stun::query_public_addr_with_fallback(&udp_stun, STUN_SERVERS)
-                        .await
+                if let Ok(addr) = seednet_nat::stun::query_public_addr_with_fallback(
+                    udp_stun.udp().unwrap().inner(),
+                    STUN_SERVERS,
+                )
+                .await
                 {
                     *stun_addr_refresh.write().await = Some(addr);
                 }

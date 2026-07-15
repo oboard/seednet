@@ -17,6 +17,7 @@ seednet-tun = { workspace = true }
 seednet-overlay = { workspace = true }
 seednet-routing = { workspace = true }
 seednet-nat = { workspace = true }
+seednet-transport = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }
 dashmap = { workspace = true }

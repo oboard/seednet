@@ -20,7 +20,6 @@ use clap::{Parser, Subcommand};
 
 use seednet_common::Seed;
 use seednet_crypto::{derive_network_secret, derive_port};
-
 /// SeedNet: a decentralized private overlay network. One seed. No accounts.
 #[derive(Debug, Parser)]
 #[command(
@@ -53,6 +52,11 @@ enum Command {
         /// so all peers on the same network use the same port automatically.
         #[arg(long)]
         port: Option<u16>,
+        /// Comma-separated list of transport protocols to enable.
+        /// Available: udp, tcp, ws  (default: all)
+        /// Example: --transport udp,tcp,ws
+        #[arg(long, default_value = "udp,tcp,ws")]
+        transport: String,
     },
     /// Bring the overlay network down (stops the running daemon).
     Down,
@@ -90,7 +94,25 @@ enum Command {
         /// UDP port to listen on.
         #[arg(long)]
         port: Option<u16>,
+        /// Comma-separated transport protocols.
+        #[arg(long, default_value = "udp")]
+        transport: String,
     },
+}
+
+fn parse_transports(s: &str) -> Vec<seednet_transport::TransportKind> {
+    s.split(',')
+        .filter_map(|t| match t.trim().to_ascii_lowercase().as_str() {
+            "udp" => Some(seednet_transport::TransportKind::Udp),
+            "tcp" => Some(seednet_transport::TransportKind::Tcp),
+            "ws" => Some(seednet_transport::TransportKind::Ws),
+            "wss" => Some(seednet_transport::TransportKind::Wss),
+            other => {
+                eprintln!("unknown transport '{other}', ignoring");
+                None
+            }
+        })
+        .collect()
 }
 
 fn main() -> Result<()> {
@@ -125,15 +147,21 @@ fn main() -> Result<()> {
         Command::Down => {
             rt.block_on(commands::down(&state_dir))?;
         }
-        Command::Up { seed, port } => {
+        Command::Up {
+            seed,
+            port,
+            transport,
+        } => {
             let state_dir_path = cli.state_dir;
             let seed = Seed::from_passphrase(&seed);
             let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
+            let transports = parse_transports(&transport);
             rt.block_on(commands::up(
                 &state_dir,
                 &seed,
                 port,
                 state_dir_path.as_deref(),
+                transports,
             ))?;
         }
         Command::List => {
@@ -149,10 +177,15 @@ fn main() -> Result<()> {
             let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
             rt.block_on(commands::discover(&seed, port, dht_port, duration))?;
         }
-        Command::Daemon { seed, port } => {
+        Command::Daemon {
+            seed,
+            port,
+            transport,
+        } => {
             let seed = Seed::from_passphrase(&seed);
             let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
-            rt.block_on(commands::daemon(&state_dir, &seed, port))?;
+            let transports = parse_transports(&transport);
+            rt.block_on(commands::daemon(&state_dir, &seed, port, transports))?;
         }
     }
 
