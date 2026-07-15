@@ -19,6 +19,7 @@ seednet-routing = { workspace = true }
 seednet-nat = { workspace = true }
 seednet-transport = { workspace = true }
 seednet-tracker = { workspace = true }
+reqwest = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }
 dashmap = { workspace = true }

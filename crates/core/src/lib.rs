@@ -387,12 +387,27 @@ impl SeedNetEngine {
         let transport = Arc::new(builder.build());
 
         // STUN: discover our public address.  Non-fatal — we continue without it.
-        let public_addr_init = seednet_nat::stun::query_public_addr_with_fallback(
+        let mut public_addr_init = seednet_nat::stun::query_public_addr_with_fallback(
             transport.udp().unwrap().inner(),
             STUN_SERVERS,
         )
         .await
         .ok();
+
+        // If STUN failed (e.g. cloud servers with 1:1 EIP NAT where the public IP
+        // is not on the interface but STUN packets are filtered), fall back to
+        // reading local network interfaces for a publicly-routable IP.
+        if public_addr_init.is_none() {
+            if let Some(local_pub) = local_public_ip(bound_port) {
+                tracing::info!(
+                    target: "seednet",
+                    public_addr = %local_pub,
+                    "STUN failed; using local interface public IP"
+                );
+                public_addr_init = Some(local_pub);
+            }
+        }
+
         let can_relay = public_addr_init.map(is_publicly_routable).unwrap_or(false);
         if let Some(addr) = public_addr_init {
             tracing::info!(target: "seednet", public_addr = %addr, can_relay, "public address discovered");
@@ -1720,6 +1735,77 @@ fn local_hostname() -> String {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
+}
+
+/// Scan local network interfaces for a publicly-routable IPv4 address.
+/// Used as STUN fallback on servers where STUN packets are filtered.
+fn local_public_ip(port: u16) -> Option<SocketAddr> {
+    // Try cloud metadata services first (AWS, Alibaba Cloud, etc.)
+    // Use reqwest blocking to avoid needing curl/wget in the container.
+    let metadata_urls = [
+        "http://169.254.169.254/latest/meta-data/public-ipv4", // AWS
+        "http://100.100.100.200/latest/meta-data/eipv4",       // Alibaba Cloud
+    ];
+    for url in metadata_urls {
+        let result = reqwest::blocking::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .ok()
+            .and_then(|c| c.get(url).send().ok())
+            .and_then(|r| r.text().ok());
+        if let Some(s) = result {
+            if let Ok(ip) = s.trim().parse::<std::net::Ipv4Addr>() {
+                if is_publicly_routable(SocketAddr::from((ip, port))) {
+                    return Some(SocketAddr::from((ip, port)));
+                }
+            }
+        }
+    }
+
+    // Fall back to routing table: find the outbound interface IP.
+    #[cfg(target_os = "linux")]
+    {
+        let out = std::process::Command::new("ip")
+            .args(["route", "get", "1.1.1.1"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8(out.stdout).ok()?;
+        for part in s.split_whitespace().collect::<Vec<_>>().windows(2) {
+            if part[0] == "src" {
+                if let Ok(ip) = part[1].parse::<std::net::Ipv4Addr>() {
+                    if is_publicly_routable(SocketAddr::from((ip, port))) {
+                        return Some(SocketAddr::from((ip, port)));
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let out = std::process::Command::new("route")
+            .args(["-n", "get", "1.1.1.1"])
+            .output()
+            .ok()?;
+        let s = String::from_utf8(out.stdout).ok()?;
+        for line in s.lines() {
+            if let Some(rest) = line.trim().strip_prefix("interface:") {
+                let iface = rest.trim();
+                if let Ok(out2) = std::process::Command::new("ipconfig")
+                    .args(["getifaddr", iface])
+                    .output()
+                {
+                    if let Ok(ip_str) = String::from_utf8(out2.stdout) {
+                        if let Ok(ip) = ip_str.trim().parse::<std::net::Ipv4Addr>() {
+                            if is_publicly_routable(SocketAddr::from((ip, port))) {
+                                return Some(SocketAddr::from((ip, port)));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 pub fn print_status(engine: &SeedNetEngine) {
