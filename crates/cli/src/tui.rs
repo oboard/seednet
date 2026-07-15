@@ -237,11 +237,20 @@ impl App {
         let pid_path = self.state_dir.join("seednet.pid");
         let pid: Option<u32> = std::fs::read_to_string(&pid_path)
             .ok()
-            .and_then(|s| s.trim().parse().ok());
+            .and_then(|s| s.trim().parse().ok())
+            .filter(|&p| pid_alive(p));
 
         match (&self.daemon, pid) {
             (DaemonState::Starting, Some(pid)) => {
                 self.push_log(format!("Daemon running (pid {pid})"));
+                self.daemon = DaemonState::Running {
+                    pid,
+                    overlay: String::new(),
+                };
+            }
+            // Daemon was already running when TUI started (e.g. launched via `seednet up`).
+            (DaemonState::Stopped, Some(pid)) => {
+                self.push_log(format!("Detected running daemon (pid {pid})"));
                 self.daemon = DaemonState::Running {
                     pid,
                     overlay: String::new(),
@@ -962,4 +971,29 @@ fn strip_ansi(s: &str) -> String {
 #[cfg(unix)]
 fn libc_kill(pid: u32, sig: i32) -> i32 {
     unsafe { libc::kill(pid as libc::pid_t, sig) }
+}
+
+/// Returns true if a process with the given PID exists.
+/// Handles the case where the daemon runs as root (EPERM means it exists).
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let r = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        if r == 0 {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            r == -1 && unsafe { *libc::__error() } == libc::EPERM
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            r == -1 && unsafe { *libc::__errno_location() } == libc::EPERM
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        false
+    }
 }
