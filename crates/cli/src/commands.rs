@@ -166,12 +166,22 @@ pub async fn up(
             .map(|k| format!("{k:?}").to_ascii_lowercase())
             .collect::<Vec<_>>()
             .join(",");
+        let direct_peers_str = direct_peers
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let tracker_url_str = tracker_urls.join(",");
         cmd.arg("_daemon")
             .arg(&seed_str)
             .arg("--port")
             .arg(port.to_string())
             .arg("--transport")
             .arg(&transport_str)
+            .arg("--tracker")
+            .arg(&direct_peers_str)
+            .arg("--tracker-url")
+            .arg(&tracker_url_str)
             .arg("-v");
 
         if let Some(dir) = explicit_state_dir {
