@@ -397,15 +397,15 @@ impl SeedNetEngine {
         // If STUN failed (e.g. cloud servers with 1:1 EIP NAT where the public IP
         // is not on the interface but STUN packets are filtered), fall back to
         // reading local network interfaces for a publicly-routable IP.
-        if public_addr_init.is_none() {
-            if let Some(local_pub) = local_public_ip(bound_port) {
-                tracing::info!(
-                    target: "seednet",
-                    public_addr = %local_pub,
-                    "STUN failed; using local interface public IP"
-                );
-                public_addr_init = Some(local_pub);
-            }
+        if public_addr_init.is_none()
+            && let Some(local_pub) = local_public_ip(bound_port)
+        {
+            tracing::info!(
+                target: "seednet",
+                public_addr = %local_pub,
+                "STUN failed; using local interface public IP"
+            );
+            public_addr_init = Some(local_pub);
         }
 
         let can_relay = public_addr_init.map(is_publicly_routable).unwrap_or(false);
@@ -417,80 +417,104 @@ impl SeedNetEngine {
         let stun_public_addr: Arc<RwLock<Option<SocketAddr>>> =
             Arc::new(RwLock::new(public_addr_init));
 
-        // Single DashMap keyed by PeerId; eliminates three separate RwLock<HashMap>
-        // and the multi-lock acquisition patterns they required.
-        let sessions: Arc<DashMap<PeerId, PeerSession>> = Arc::new(DashMap::new());
-        // Reverse index: TransportAddr → PeerId, for O(1) inbound dispatch.
-        let addr_index: Arc<DashMap<TransportAddr, PeerId>> = Arc::new(DashMap::new());
-        let pending_handshakes: Arc<
-            RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>,
-        > = Arc::new(RwLock::new(HashMap::new()));
-
+        // Start DHT, tracker queries, and DHT announce all concurrently.
+        // Direct peers are available immediately; tracker + DHT peers arrive
+        // as background tasks complete and feed into the discovery loop.
         let dht = DhtDiscovery::start_with(0, std::net::Ipv4Addr::UNSPECIFIED, &[])
             .map_err(|e| Error::Dht(format!("DHT start failed: {e}")))?;
 
-        tracing::info!(target: "seednet", "Waiting for DHT bootstrap …");
-        let bootstrapped = tokio::time::timeout(Duration::from_secs(15), dht.bootstrapped()).await;
-        match bootstrapped {
-            Ok(true) => tracing::info!(target: "seednet", "DHT bootstrapped"),
-            Ok(false) => tracing::warn!(target: "seednet", "DHT bootstrap returned false"),
-            Err(_) => {
-                tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s, continuing anyway")
-            }
-        }
-
-        // Use the STUN-mapped port for DHT announcement so that NATted peers
-        // announce their actual reachable port, not the local bind port.
-        let announce_port = public_addr_init.map(|a| a.port()).unwrap_or(port);
-        if let Err(e) = dht.announce(&self.infohash, announce_port).await {
-            tracing::warn!(target: "seednet", error = %e, "DHT announce failed, continuing anyway");
-        } else {
-            tracing::info!(target: "seednet", port = announce_port, "Announced on DHT");
-        }
-
-        // Tracker announce: query all configured trackers and collect peers.
-        // Run concurrently with DHT; results feed into the first discovery cycle.
+        // Build tracker peer list.
         let mut tracker_addrs: Vec<std::net::SocketAddr> = self.config.direct_peers.clone();
-        if !self.config.tracker_urls.is_empty() {
-            let infohash_bytes: [u8; 20] = {
-                let b = self.infohash.as_bytes();
-                let mut arr = [0u8; 20];
-                arr.copy_from_slice(b);
-                arr
-            };
-            // Derive a stable 20-byte peer_id from our Ed25519 public key.
-            let peer_id_bytes: [u8; 20] = {
-                let pk = self.our_peer_id.as_bytes();
-                let mut id = [0u8; 20];
-                id.copy_from_slice(&pk[..20]);
-                id
-            };
-            let mut tracker_futures = Vec::new();
-            for url in &self.config.tracker_urls {
-                let url = url.clone();
-                let ih = infohash_bytes;
-                let pid = peer_id_bytes;
-                tracker_futures.push(tokio::spawn(async move {
-                    seednet_tracker::announce(&url, &ih, &pid, port).await
-                }));
-            }
-            for fut in tracker_futures {
-                if let Ok(peers) = fut.await {
-                    tracing::info!(target: "seednet", count = peers.len(), "tracker returned peers");
-                    for p in peers {
-                        if !tracker_addrs.contains(&p) {
-                            tracker_addrs.push(p);
-                        }
+        let infohash_bytes: [u8; 20] = {
+            let b = self.infohash.as_bytes();
+            let mut arr = [0u8; 20];
+            arr.copy_from_slice(b);
+            arr
+        };
+        let peer_id_bytes: [u8; 20] = {
+            let pk = self.our_peer_id.as_bytes();
+            let mut id = [0u8; 20];
+            id.copy_from_slice(&pk[..20]);
+            id
+        };
+        let announce_port = public_addr_init.map(|a| a.port()).unwrap_or(port);
+
+        // Launch all three concurrently and wait for all to finish.
+        let ((), tracker_results) = tokio::join!(
+            // 1. DHT bootstrap + announce
+            async {
+                tracing::info!(target: "seednet", "Waiting for DHT bootstrap …");
+                let bootstrapped =
+                    tokio::time::timeout(Duration::from_secs(15), dht.bootstrapped()).await;
+                match bootstrapped {
+                    Ok(true) => tracing::info!(target: "seednet", "DHT bootstrapped"),
+                    Ok(false) => {
+                        tracing::warn!(target: "seednet", "DHT bootstrap returned false")
+                    }
+                    Err(_) => tracing::warn!(
+                        target: "seednet",
+                        "DHT bootstrap timed out after 15s, continuing anyway"
+                    ),
+                }
+                if let Err(e) = dht.announce(&self.infohash, announce_port).await {
+                    tracing::warn!(target: "seednet", error = %e, "DHT announce failed");
+                } else {
+                    tracing::info!(target: "seednet", port = announce_port, "Announced on DHT");
+                }
+            },
+            // 2. Tracker queries (all concurrent internally)
+            async {
+                if self.config.tracker_urls.is_empty() {
+                    return Vec::new();
+                }
+                let mut futs = Vec::new();
+                for url in &self.config.tracker_urls {
+                    let url = url.clone();
+                    let ih = infohash_bytes;
+                    let pid = peer_id_bytes;
+                    futs.push(tokio::spawn(async move {
+                        seednet_tracker::announce(&url, &ih, &pid, port).await
+                    }));
+                }
+                let mut all = Vec::new();
+                for fut in futs {
+                    if let Ok(peers) = fut.await {
+                        all.extend(peers);
                     }
                 }
+                tracing::info!(
+                    target: "seednet",
+                    count = all.len(),
+                    "tracker peers collected"
+                );
+                all
             }
-            tracing::info!(target: "seednet", total = tracker_addrs.len(), "tracker+direct peers collected");
+        );
+        for p in tracker_results {
+            if !tracker_addrs.contains(&p) {
+                tracker_addrs.push(p);
+            }
+        }
+        if !tracker_addrs.is_empty() {
+            tracing::info!(
+                target: "seednet",
+                total = tracker_addrs.len(),
+                "tracker+direct peers ready"
+            );
         }
 
         // relay_candidates: relay_peer_id → underlay SocketAddr
         let relay_candidates: Arc<DashMap<PeerId, SocketAddr>> = Arc::new(DashMap::new());
         // relay_paths: dst_peer_id → relay_peer_id
         let relay_paths: Arc<DashMap<PeerId, PeerId>> = Arc::new(DashMap::new());
+
+        // Single DashMap keyed by PeerId.
+        let sessions: Arc<DashMap<PeerId, PeerSession>> = Arc::new(DashMap::new());
+        // Reverse index: TransportAddr → PeerId, for O(1) inbound dispatch.
+        let addr_index: Arc<DashMap<TransportAddr, PeerId>> = Arc::new(DashMap::new());
+        let pending_handshakes: Arc<
+            RwLock<HashMap<SocketAddr, tokio::sync::oneshot::Sender<Vec<u8>>>>,
+        > = Arc::new(RwLock::new(HashMap::new()));
 
         let router_out = self.routing_table.clone();
         let sessions_out = sessions.clone();
@@ -1753,12 +1777,11 @@ fn local_public_ip(port: u16) -> Option<SocketAddr> {
             .ok()
             .and_then(|c| c.get(url).send().ok())
             .and_then(|r| r.text().ok());
-        if let Some(s) = result {
-            if let Ok(ip) = s.trim().parse::<std::net::Ipv4Addr>() {
-                if is_publicly_routable(SocketAddr::from((ip, port))) {
-                    return Some(SocketAddr::from((ip, port)));
-                }
-            }
+        if let Some(s) = result
+            && let Ok(ip) = s.trim().parse::<std::net::Ipv4Addr>()
+            && is_publicly_routable(SocketAddr::from((ip, port)))
+        {
+            return Some(SocketAddr::from((ip, port)));
         }
     }
 
@@ -1793,14 +1816,11 @@ fn local_public_ip(port: u16) -> Option<SocketAddr> {
                 if let Ok(out2) = std::process::Command::new("ipconfig")
                     .args(["getifaddr", iface])
                     .output()
+                    && let Ok(ip_str) = String::from_utf8(out2.stdout)
+                    && let Ok(ip) = ip_str.trim().parse::<std::net::Ipv4Addr>()
+                    && is_publicly_routable(SocketAddr::from((ip, port)))
                 {
-                    if let Ok(ip_str) = String::from_utf8(out2.stdout) {
-                        if let Ok(ip) = ip_str.trim().parse::<std::net::Ipv4Addr>() {
-                            if is_publicly_routable(SocketAddr::from((ip, port))) {
-                                return Some(SocketAddr::from((ip, port)));
-                            }
-                        }
-                    }
+                    return Some(SocketAddr::from((ip, port)));
                 }
             }
         }
