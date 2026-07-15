@@ -198,17 +198,67 @@ impl App {
         self.push_log("Stopping daemon…");
         self.daemon = DaemonState::Stopping;
 
+        // The daemon runs as root; we can't send it SIGTERM directly.
+        // Spawn `sudo seednet down` which has the privilege to kill it.
         let pid_path = self.state_dir.join("seednet.pid");
-        if let Ok(s) = std::fs::read_to_string(&pid_path)
-            && let Ok(pid) = s.trim().parse::<u32>()
-        {
+        let pid: Option<u32> = std::fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok());
+
+        let stopped = if let Some(pid) = pid {
+            // Try direct kill first (works if TUI owns the process, e.g. started from TUI).
             #[cfg(unix)]
-            libc_kill(pid, 15);
-            self.push_log(format!("Sent SIGTERM to pid {pid}"));
-        }
+            let direct = {
+                let r = libc_kill(pid, 15);
+                r == 0
+            };
+            #[cfg(not(unix))]
+            let direct = false;
+
+            if direct {
+                self.push_log(format!("Sent SIGTERM to pid {pid}"));
+                true
+            } else {
+                // Fall back to `sudo seednet down` for root daemons.
+                // Use -n (non-interactive) so it never blocks waiting for a password.
+                // If that fails (password required), fall back to SIGKILL.
+                let down_ok = std::process::Command::new("sudo")
+                    .args([
+                        "-n",
+                        self.exe_path.to_str().unwrap_or("seednet"),
+                        "down",
+                        "--state-dir",
+                        self.state_dir.to_str().unwrap_or(""),
+                    ])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if down_ok {
+                    self.push_log("Stopped via `sudo -n seednet down`.");
+                    true
+                } else {
+                    // sudo needs password — SIGKILL directly (process will be orphaned
+                    // but the pid file will be cleaned up below).
+                    #[cfg(unix)]
+                    libc_kill(pid, 9);
+                    self.push_log(format!("Sent SIGKILL to pid {pid}"));
+                    true
+                }
+            }
+        } else {
+            false
+        };
+
         if let Some(mut child) = self.daemon_child.take() {
             let _ = child.kill();
         }
+
+        if stopped {
+            // Give the daemon a moment to clean up.
+            std::thread::sleep(std::time::Duration::from_millis(600));
+        }
+
+        let _ = std::fs::remove_file(&pid_path);
         self.peers.clear();
         self.daemon = DaemonState::Stopped;
         self.push_log("Daemon stopped.");

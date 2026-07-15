@@ -631,6 +631,19 @@ impl SeedNetEngine {
                                                         sessions_in.insert(peer_id, session);
                                                     }
                                                     addr_index_in.insert(from.clone(), peer_id);
+
+                                                    // Fix routing table BEFORE triggering Connected
+                                                    // event so peers.json snapshot sees correct overlay.
+                                                    let stale = derive_overlay_addr(&old_id);
+                                                    let correct_overlay = OverlayAddr::new(
+                                                        std::net::Ipv4Addr::from(overlay),
+                                                    );
+                                                    {
+                                                        let mut rt = routing_table_in.write().await;
+                                                        rt.remove_route(&stale);
+                                                        rt.add_route(correct_overlay, peer_id);
+                                                    }
+
                                                     // Re-key peer_manager: move from X25519 id to Ed25519 id.
                                                     if let Some(old_peer) =
                                                         peer_mgr_in.remove(&old_id)
@@ -642,7 +655,6 @@ impl SeedNetEngine {
                                                         let new_peer = peer_mgr_in
                                                             .discover(peer_id, addr)
                                                             .await;
-                                                        // Carry over state to Connected.
                                                         let _ = peer_mgr_in
                                                             .transition_peer(
                                                                 &peer_id,
@@ -655,27 +667,24 @@ impl SeedNetEngine {
                                                                 PeerState::Handshaking,
                                                             )
                                                             .await;
+                                                        // Connected event fires here — routing
+                                                        // table is already correct at this point.
                                                         let _ = peer_mgr_in
                                                             .transition_peer(
                                                                 &peer_id,
                                                                 PeerState::Connected,
                                                             )
                                                             .await;
-                                                        let _ = new_peer; // used above
+                                                        let _ = new_peer;
                                                     }
-                                                    // Remove stale X25519-derived route.
-                                                    let stale = derive_overlay_addr(&old_id);
-                                                    let mut rt = routing_table_in.write().await;
-                                                    rt.remove_route(&stale);
-                                                    drop(rt);
-                                                }
-                                                // Add correct route under Ed25519 overlay.
-                                                let correct_overlay = OverlayAddr::new(
-                                                    std::net::Ipv4Addr::from(overlay),
-                                                );
-                                                {
+                                                } else {
+                                                    // peer_id unchanged — just update the route.
+                                                    let correct_overlay = OverlayAddr::new(
+                                                        std::net::Ipv4Addr::from(overlay),
+                                                    );
                                                     let mut rt = routing_table_in.write().await;
                                                     rt.add_route(correct_overlay, peer_id);
+                                                    drop(rt);
                                                 }
                                                 tracing::info!(target: "seednet",
                                                     peer = %peer_id.short(),
