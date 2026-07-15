@@ -122,13 +122,13 @@ pub async fn up(
             &log_path,
             explicit_state_dir,
         ) {
-            Ok(()) => println!(
-                "  boot    : plist saved — run `sudo seednet up oboard --port {port}` after reboot"
-            ),
+            Ok(()) => {
+                println!("  boot    : plist saved — run `sudo seednet up oboard` after reboot")
+            }
             Err(e) => println!("  boot    : plist install failed — {e}"),
         }
 
-        return Ok(());
+        Ok(())
     }
 
     // Non-macOS: spawn the daemon directly.

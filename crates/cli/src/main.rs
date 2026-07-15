@@ -19,6 +19,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 use seednet_common::Seed;
+use seednet_crypto::{derive_network_secret, derive_port};
 
 /// SeedNet: a decentralized private overlay network. One seed. No accounts.
 #[derive(Debug, Parser)]
@@ -48,9 +49,10 @@ enum Command {
         /// The network seed (passphrase). Every device with the same seed
         /// joins the same network.
         seed: String,
-        /// UDP port to listen on (default 4242).
-        #[arg(long, default_value_t = seednet_common::DEFAULT_PORT)]
-        port: u16,
+        /// UDP port to listen on. Defaults to a port derived from the seed
+        /// so all peers on the same network use the same port automatically.
+        #[arg(long)]
+        port: Option<u16>,
     },
     /// Bring the overlay network down (stops the running daemon).
     Down,
@@ -69,9 +71,9 @@ enum Command {
     Discover {
         /// The network seed (passphrase).
         seed: String,
-        /// UDP port for SeedNet traffic (default 4242).
-        #[arg(long, default_value_t = seednet_common::DEFAULT_PORT)]
-        port: u16,
+        /// UDP port for SeedNet traffic. Defaults to the seed-derived port.
+        #[arg(long)]
+        port: Option<u16>,
         /// DHT port (bind). Defaults to the SeedNet port.
         #[arg(long)]
         dht_port: Option<u16>,
@@ -86,8 +88,8 @@ enum Command {
         /// The network seed (passphrase).
         seed: String,
         /// UDP port to listen on.
-        #[arg(long, default_value_t = seednet_common::DEFAULT_PORT)]
-        port: u16,
+        #[arg(long)]
+        port: Option<u16>,
     },
 }
 
@@ -126,6 +128,7 @@ fn main() -> Result<()> {
         Command::Up { seed, port } => {
             let state_dir_path = cli.state_dir;
             let seed = Seed::from_passphrase(&seed);
+            let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
             rt.block_on(commands::up(
                 &state_dir,
                 &seed,
@@ -143,10 +146,12 @@ fn main() -> Result<()> {
             duration,
         } => {
             let seed = Seed::from_passphrase(&seed);
+            let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
             rt.block_on(commands::discover(&seed, port, dht_port, duration))?;
         }
         Command::Daemon { seed, port } => {
             let seed = Seed::from_passphrase(&seed);
+            let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
             rt.block_on(commands::daemon(&state_dir, &seed, port))?;
         }
     }

@@ -183,10 +183,33 @@ impl SeedNetEngine {
             tracing::warn!(target: "seednet", error = %e, "platform IP config failed (may need manual ifconfig/ip)");
         }
 
-        let udp_socket = UdpSocket::bind(format!("0.0.0.0:{port}"))
-            .await
-            .map_err(Error::Io)?;
-        tracing::info!(target: "seednet", port, "UDP data socket bound");
+        // Try to bind the preferred port; fall back to the next available port
+        // if it is already in use.  Try up to 10 consecutive ports before giving up.
+        let udp_socket = {
+            let mut last_err = None;
+            let mut bound = None;
+            for offset in 0u16..10 {
+                let try_port = port.saturating_add(offset);
+                match UdpSocket::bind(format!("0.0.0.0:{try_port}")).await {
+                    Ok(sock) => {
+                        if offset > 0 {
+                            tracing::info!(
+                                target: "seednet",
+                                preferred = port,
+                                actual = try_port,
+                                "preferred port in use, bound to next available port",
+                            );
+                        }
+                        bound = Some(sock);
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            bound.ok_or_else(|| Error::Io(last_err.unwrap()))?
+        };
+        let bound_port = udp_socket.local_addr().map(|a| a.port()).unwrap_or(port);
+        tracing::info!(target: "seednet", port = bound_port, "UDP data socket bound");
 
         // STUN: discover our public address.  Non-fatal — we continue without it.
         let public_addr_init =

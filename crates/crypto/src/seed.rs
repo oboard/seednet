@@ -40,6 +40,24 @@ pub fn derive_infohash(secret: &NetworkSecret) -> InfoHash {
     InfoHash::from_bytes(out)
 }
 
+/// Derive a UDP port deterministically from the [`NetworkSecret`].
+///
+/// Every device that shares the same seed will derive the same port, so they
+/// can find each other in the DHT without exchanging port numbers out-of-band.
+///
+/// The port is mapped into `[1024, 49151]` (IANA registered-port range),
+/// skipping the lowest 1024 well-known ports and staying below the ephemeral
+/// range (49152+) so NATs can map it reliably.
+pub fn derive_port(secret: &NetworkSecret) -> u16 {
+    let hk = Hkdf::<Sha256>::new(None, secret.as_bytes());
+    let mut okm = [0u8; 2];
+    hk.expand(b"seednet udp port v1", &mut okm)
+        .expect("HKDF expand of 2 bytes cannot fail");
+    let raw = u16::from_be_bytes(okm);
+    // Map into [1024, 49151]: range size = 48128.
+    1024 + (raw % 48128)
+}
+
 /// Derive an [`OverlayAddr`] deterministically from a device's public key.
 ///
 /// Produces a stable address in `10.88.0.0/16`, starting at `10.88.1.0` to
