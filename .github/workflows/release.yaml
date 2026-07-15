@@ -2,10 +2,13 @@ name: Release
 
 on:
   release:
-    types: [created]
+    types: [created, edited]
 
 env:
   CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -41,7 +44,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -88,6 +91,6 @@ jobs:
           cp "$BIN" "${{ matrix.name }}"
 
       - name: Upload to release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: ${{ matrix.name }}
