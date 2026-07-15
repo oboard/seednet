@@ -27,11 +27,104 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
 
 const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
-const DISCOVERY_INTERVAL: Duration = Duration::from_secs(30);
+/// How often to re-scan DHT for new peers and retry pending connections.
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long to wait for a direct handshake before falling back to relay.
+/// Kept short so relay is available quickly; direct connection is retried
+/// in the background and upgrades the path when it succeeds.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const NOISE_HANDSHAKE_INITIATOR_PREFIX: &[u8] = b"seednet-hs-a";
 const NOISE_HANDSHAKE_RESPONDER_PREFIX: &[u8] = b"seednet-hs-b";
+
+/// Default BitTorrent tracker list (ngosang/trackerslist, trackers_all).
+/// Used for fast peer discovery without waiting for DHT bootstrap.
+const DEFAULT_TRACKERS: &[&str] = &[
+    "udp://tracker.publictracker.xyz:6969/announce",
+    "udp://tracker.opentrackr.org:1337/announce",
+    "http://tracker.opentrackr.org:1337/announce",
+    "udp://open.demonii.com:1337/announce",
+    "udp://open.tracker.cl:1337/announce",
+    "http://open.tracker.cl:1337/announce",
+    "udp://open.stealth.si:80/announce",
+    "udp://tracker2.dler.org:80/announce",
+    "udp://tracker.wildkat.net:6969/announce",
+    "udp://tracker.tryhackx.org:6969/announce",
+    "udp://tracker.torrent.eu.org:451/announce",
+    "udp://tracker.qu.ax:6969/announce",
+    "udp://tracker.opentorrent.top:6969/announce",
+    "udp://tracker.bittor.pw:1337/announce",
+    "udp://tracker.auctor.tv:6969/announce",
+    "udp://tracker-udp.gbitt.info:80/announce",
+    "udp://tr4ck3r.duckdns.org:6969/announce",
+    "udp://torrentclub.online:54123/announce",
+    "udp://t.overflow.biz:6969/announce",
+    "udp://seedpeer.net:6969/announce",
+    "udp://retracker01-msk-virt.corbina.net:80/announce",
+    "udp://ns575949.ip-51-222-82.net:6969/announce",
+    "udp://leet-tracker.moe:1337/announce",
+    "udp://ipv4announce.sktorrent.eu:6969/announce",
+    "udp://exodus.desync.com:6969/announce",
+    "udp://evan.im:6969/announce",
+    "udp://bittorrent-tracker.e-n-c-r-y-p-t.net:1337/announce",
+    "udp://admin.52ywp.com:6969/announce",
+    "https://tracker.zhuqiy.com:443/announce",
+    "https://tracker.yemekyedim.com:443/announce",
+    "https://tracker.pmman.tech:443/announce",
+    "https://tracker.nekomi.cn:443/announce",
+    "https://tracker.leechshield.link:443/announce",
+    "https://tracker.gcrenwp.top:443/announce",
+    "https://tracker.bt4g.com:443/announce",
+    "https://tracker.7471.top:443/announce",
+    "https://tr.zukizuki.org:443/announce",
+    "https://tr.nyacat.pw:443/announce",
+    "https://open.ftorrent.com:443/announce",
+    "http://www.torrentsnipe.info:2701/announce",
+    "http://tracker810.xyz:11450/announce",
+    "http://tracker.zhuqiy.com:80/announce",
+    "http://tracker.waaa.moe:6969/announce",
+    "http://tracker.vanitycore.co:6969/announce",
+    "http://tracker.renfei.net:8080/announce",
+    "http://tracker.qu.ax:6969/announce",
+    "http://tracker.privateseedbox.xyz:2710/announce",
+    "http://tracker.mywaifu.best:6969/announce",
+    "http://tracker.lintk.me:2710/announce",
+    "http://tracker.ipv6tracker.org:80/announce",
+    "http://tracker.dhitechnical.com:6969/announce",
+    "http://tracker.bt4g.com:2095/announce",
+    "http://tr.nyacat.pw:80/announce",
+    "http://tr.kxmp.cf:80/announce",
+    "http://torrent.hificode.in:6969/announce",
+    "http://t.overflow.biz:6969/announce",
+    "http://shubt.net:2710/announce",
+    "http://seeders-paradise.org:80/announce",
+    "http://open.trackerlist.xyz:80/announce",
+    "http://jvavav.com:80/announce",
+    "http://home.yxgz.club:6969/announce",
+    "http://bt1.xxxxbt.cc:6969/announce",
+    "http://bittorrent-tracker.e-n-c-r-y-p-t.net:1337/announce",
+    "http://1337.abcvg.info:80/announce",
+    "http://004430.xyz:80/announce",
+    "udp://tracker.therarbg.to:6969/announce",
+    "udp://tracker.skynetcloud.site:6969/announce",
+    "udp://tracker.playground.ru:6969/announce",
+    "udp://tracker.peerfect.org:6969/announce",
+    "udp://tracker.nyaa.vc:6969/announce",
+    "udp://tracker.gmi.gd:6969/announce",
+    "udp://tracker.filemail.com:6969/announce",
+    "udp://tracker.dler.org:6969/announce",
+    "udp://tracker.ddunlimited.net:6969/announce",
+    "udp://tracker.corpscorp.online:80/announce",
+    "udp://open.ftorrent.com:443/announce",
+    "udp://open.demonoid.ch:6969/announce",
+    "udp://martin-gebhardt.eu:25/announce",
+    "udp://explodie.org:6969/announce",
+    "https://t.213891.xyz:443/announce",
+    "https://pybittrack.retiolus.net:443/announce",
+    "http://tracker2.dler.org:80/announce",
+    "http://tracker.dler.org:6969/announce",
+    "http://tracker.dler.com:6969/announce",
+];
 
 /// Combined per-peer session state: Noise transport + underlay address.
 ///
@@ -48,8 +141,15 @@ pub struct SeedNetConfig {
     pub seed: Seed,
     pub port: u16,
     pub state_dir: StateDir,
-    /// Which transport protocols to enable. Defaults to UDP-only.
+    /// Which transport protocols to enable. Defaults to all.
     pub transports: Vec<seednet_transport::TransportKind>,
+    /// BitTorrent tracker URLs (HTTP or UDP) to announce to and discover
+    /// peers from. Faster than DHT for initial connection.
+    /// Example: "udp://tracker.opentrackr.org:1337"
+    pub tracker_urls: Vec<String>,
+    /// Known direct peer addresses to connect to immediately on startup
+    /// (bypasses DHT and tracker latency entirely).
+    pub direct_peers: Vec<std::net::SocketAddr>,
 }
 
 impl SeedNetConfig {
@@ -63,6 +163,8 @@ impl SeedNetConfig {
                 seednet_transport::TransportKind::Tcp,
                 seednet_transport::TransportKind::Ws,
             ],
+            tracker_urls: DEFAULT_TRACKERS.iter().map(|s| s.to_string()).collect(),
+            direct_peers: Vec::new(),
         }
     }
 }
@@ -303,6 +405,45 @@ impl SeedNetEngine {
             tracing::info!(target: "seednet", port = announce_port, "Announced on DHT");
         }
 
+        // Tracker announce: query all configured trackers and collect peers.
+        // Run concurrently with DHT; results feed into the first discovery cycle.
+        let mut tracker_addrs: Vec<std::net::SocketAddr> = self.config.direct_peers.clone();
+        if !self.config.tracker_urls.is_empty() {
+            let infohash_bytes: [u8; 20] = {
+                let b = self.infohash.as_bytes();
+                let mut arr = [0u8; 20];
+                arr.copy_from_slice(b);
+                arr
+            };
+            // Derive a stable 20-byte peer_id from our Ed25519 public key.
+            let peer_id_bytes: [u8; 20] = {
+                let pk = self.our_peer_id.as_bytes();
+                let mut id = [0u8; 20];
+                id.copy_from_slice(&pk[..20]);
+                id
+            };
+            let mut tracker_futures = Vec::new();
+            for url in &self.config.tracker_urls {
+                let url = url.clone();
+                let ih = infohash_bytes;
+                let pid = peer_id_bytes;
+                tracker_futures.push(tokio::spawn(async move {
+                    seednet_tracker::announce(&url, &ih, &pid, port).await
+                }));
+            }
+            for fut in tracker_futures {
+                if let Ok(peers) = fut.await {
+                    tracing::info!(target: "seednet", count = peers.len(), "tracker returned peers");
+                    for p in peers {
+                        if !tracker_addrs.contains(&p) {
+                            tracker_addrs.push(p);
+                        }
+                    }
+                }
+            }
+            tracing::info!(target: "seednet", total = tracker_addrs.len(), "tracker+direct peers collected");
+        }
+
         // relay_candidates: relay_peer_id → underlay SocketAddr
         let relay_candidates: Arc<DashMap<PeerId, SocketAddr>> = Arc::new(DashMap::new());
         // relay_paths: dst_peer_id → relay_peer_id
@@ -518,6 +659,15 @@ impl SeedNetEngine {
                                         "handshake completed (responder)"
                                     );
 
+                                    // Direct connection succeeded — remove any relay path.
+                                    if relay_paths_in.remove(&peer_id).is_some() {
+                                        tracing::info!(
+                                            target: "seednet",
+                                            peer = %peer_id.short(),
+                                            "upgraded from relay to direct connection (responder)"
+                                        );
+                                    }
+
                                     sessions_in.insert(
                                         peer_id,
                                         PeerSession {
@@ -549,7 +699,7 @@ impl SeedNetEngine {
                                         let _ = udp_in.send_to(&enc, from.clone()).await;
                                     }
 
-                                    // If we can relay, advertise ourselves.
+                                    // If we can relay, advertise ourselves and send peer directory.
                                     if can_relay_in
                                         && let Some(our_pub) = *stun_addr_resp.read().await
                                     {
@@ -563,6 +713,30 @@ impl SeedNetEngine {
                                             && let Ok(enc) = session.transport.encrypt(&announce)
                                         {
                                             let _ = udp_in.send_to(&enc, from.clone()).await;
+                                        }
+
+                                        // Send peer directory so the new peer can request relay
+                                        // for peers it hasn't connected to yet.
+                                        let entries: Vec<(PeerId, SocketAddr)> = sessions_in
+                                            .iter()
+                                            .filter(|e| *e.key() != peer_id)
+                                            .filter_map(|e| {
+                                                if let TransportAddr::Udp(a) = e.underlay {
+                                                    Some((*e.key(), a))
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        if !entries.is_empty() {
+                                            let dir = seednet_peer::message::serialize_message(
+                                                &Message::PeerDirectory { entries },
+                                            );
+                                            if let Some(mut session) = sessions_in.get_mut(&peer_id)
+                                                && let Ok(enc) = session.transport.encrypt(&dir)
+                                            {
+                                                let _ = udp_in.send_to(&enc, from.clone()).await;
+                                            }
                                         }
                                     }
 
@@ -714,6 +888,52 @@ impl SeedNetEngine {
                                                     .insert(relay_peer_id, public_addr);
                                                 tracing::info!(target: "seednet", relay = %relay_peer_id.short(), addr = %public_addr, "relay candidate registered");
                                             }
+                                            Ok(Message::PeerDirectory { entries }) => {
+                                                // The relay sent us a list of peers it knows.
+                                                // For each peer we're not yet connected to,
+                                                // immediately request a relay path.
+                                                let relay_id = addr_index_in.get(&from).map(|r| *r);
+                                                if let Some(rid) = relay_id {
+                                                    for (pid, pub_addr) in &entries {
+                                                        if *pid == our_peer_id_relay {
+                                                            continue; // skip ourselves
+                                                        }
+                                                        // Record the peer's public addr for future hole-punch.
+                                                        let p = peer_mgr_in
+                                                            .discover(*pid, *pub_addr)
+                                                            .await;
+                                                        p.set_public_addr(*pub_addr).await;
+
+                                                        if !sessions_in.contains_key(pid) {
+                                                            // Not yet connected — request relay immediately.
+                                                            if let Some(mut rsession) =
+                                                                sessions_in.get_mut(&rid)
+                                                            {
+                                                                let req = seednet_peer::message::serialize_message(
+                                                                    &Message::RelayRequest { dst_peer_id: *pid },
+                                                                );
+                                                                if let Ok(enc) =
+                                                                    rsession.transport.encrypt(&req)
+                                                                {
+                                                                    let raddr =
+                                                                        rsession.underlay.clone();
+                                                                    drop(rsession);
+                                                                    let _ = udp_in
+                                                                        .send_to(&enc, raddr)
+                                                                        .await;
+                                                                    tracing::info!(
+                                                                        target: "seednet",
+                                                                        peer = %pid.short(),
+                                                                        relay = %rid.short(),
+                                                                        pub_addr = %pub_addr,
+                                                                        "requested relay via peer directory"
+                                                                    );
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
                                             Ok(Message::RelayRequest { dst_peer_id }) => {
                                                 // We are the relay: forward request to dst, notify requester.
                                                 if can_relay_in {
@@ -757,6 +977,22 @@ impl SeedNetEngine {
                                                                     .await;
                                                             }
                                                         }
+                                                    }
+                                                } else {
+                                                    // We are the destination: the relay forwarded a
+                                                    // RelayRequest from dst_peer_id (confusingly named —
+                                                    // when forwarded, dst_peer_id = the requesting peer).
+                                                    // Record the relay path so we can send back.
+                                                    let relay_id =
+                                                        addr_index_in.get(&from).map(|r| *r);
+                                                    if let Some(rid) = relay_id {
+                                                        relay_paths_in.insert(dst_peer_id, rid);
+                                                        tracing::info!(
+                                                            target: "seednet",
+                                                            peer = %dst_peer_id.short(),
+                                                            relay = %rid.short(),
+                                                            "relay path recorded (as destination)"
+                                                        );
                                                     }
                                                 }
                                             }
@@ -862,7 +1098,8 @@ impl SeedNetEngine {
         let si_overlay_dht = our_overlay_si;
         let si_overlay_ipv6_dht = our_overlay_ipv6_si;
         let si_hostname_dht = our_hostname_si.clone();
-        let _ = relay_candidates.clone(); // relay_candidates available via relay_candidates_out
+        let relay_candidates_dht = relay_candidates.clone();
+        let relay_paths_dht = relay_paths.clone();
         let can_relay_dht = can_relay;
         let our_peer_id_relay_dht = self.our_peer_id;
         let pending_dht = pending_handshakes.clone();
@@ -873,252 +1110,320 @@ impl SeedNetEngine {
         let dht_clone = dht.clone();
         let discovery_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
+            // On first tick fire immediately to connect trackers without delay.
+            let mut first_tick = true;
             loop {
-                interval.tick().await;
-                match dht_clone.lookup(&infohash).await {
-                    Ok(peers) => {
-                        tracing::info!(target: "seednet", count = peers.len(), "DHT lookup completed");
+                if first_tick {
+                    first_tick = false;
+                } else {
+                    interval.tick().await;
+                }
 
-                        for addr in peers {
-                            // Skip our own public address (stale DHT record from a previous identity).
-                            if let Some(our_pub) = *stun_addr_dht.read().await
-                                && addr == our_pub
-                            {
-                                tracing::debug!(target: "seednet", addr = %addr, "skipping own public address");
+                // Merge tracker addrs into the peer list — they take priority.
+                let dht_peers = dht_clone.lookup(&infohash).await.unwrap_or_default();
+                tracing::info!(target: "seednet", dht = dht_peers.len(), trackers = tracker_addrs.len(), "discovery cycle");
+                // Trackers first so they're attempted before DHT peers.
+                let mut peers: Vec<std::net::SocketAddr> = tracker_addrs.clone();
+                for p in dht_peers {
+                    if !peers.contains(&p) {
+                        peers.push(p);
+                    }
+                }
+                let peers_len = peers.len();
+                if peers_len > 0 {
+                    tracing::info!(target: "seednet", count = peers_len, "peers to try this cycle");
+                }
+
+                for addr in peers {
+                    // Skip our own public address (stale DHT record from a previous identity).
+                    if let Some(our_pub) = *stun_addr_dht.read().await
+                        && addr == our_pub
+                    {
+                        tracing::debug!(target: "seednet", addr = %addr, "skipping own public address");
+                        continue;
+                    }
+
+                    // Only skip if we have BOTH an addr→peer mapping AND
+                    // an active session. If the session dropped (heartbeat
+                    // timeout, etc.) we must re-handshake.
+                    let already_connected = addr_index_dht
+                        .get(&TransportAddr::Udp(addr))
+                        .map(|peer_id| sessions_dht.contains_key(&*peer_id))
+                        .unwrap_or(false);
+
+                    if already_connected {
+                        tracing::debug!(target: "seednet", addr = %addr, "peer already connected, skipping");
+                        continue;
+                    }
+
+                    // Clean up stale addr_index entry if session is gone.
+                    if let Some(peer_id) = addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r)
+                        && !sessions_dht.contains_key(&peer_id)
+                    {
+                        addr_index_dht.remove(&TransportAddr::Udp(addr));
+                        tracing::debug!(target: "seednet", addr = %addr, "cleaned stale addr_index entry, will re-handshake");
+                    }
+
+                    tracing::info!(target: "seednet", addr = %addr, "initiating handshake to discovered peer");
+
+                    let mut initiator = match InitiatorHandshake::new(
+                        &network_secret_dht,
+                        &device_keys_dht,
+                    ) {
+                        Ok(i) => i,
+                        Err(e) => {
+                            tracing::warn!(target: "seednet", error = %e, "initiator create failed");
+                            continue;
+                        }
+                    };
+
+                    let msg_a = match initiator.write_message_a(&[]) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            tracing::warn!(target: "seednet", error = %e, "write_message_a failed");
+                            continue;
+                        }
+                    };
+
+                    let mut tagged_a = NOISE_HANDSHAKE_INITIATOR_PREFIX.to_vec();
+                    tagged_a.extend_from_slice(&msg_a);
+
+                    // Insert the oneshot sender BEFORE send_to so the inbound
+                    // task can never receive msg B and look up a missing entry.
+                    // On send failure the entry is removed before continuing.
+                    // Also skip if a handshake is already in-flight for this addr.
+                    let (tx, rx) = tokio::sync::oneshot::channel();
+                    {
+                        let mut pending = pending_dht.write().await;
+                        if pending.contains_key(&addr) {
+                            tracing::debug!(target: "seednet", addr = %addr, "handshake already in flight, skipping");
+                            continue;
+                        }
+                        pending.insert(addr, tx);
+                    }
+
+                    if let Err(e) = udp_dht.send_to(&tagged_a, TransportAddr::Udp(addr)).await {
+                        let mut pending = pending_dht.write().await;
+                        pending.remove(&addr);
+                        tracing::warn!(target: "seednet", error = %e, "send msg A failed");
+                        continue;
+                    }
+
+                    tracing::debug!(target: "seednet", addr = %addr, "msg A sent, waiting for msg B");
+
+                    match tokio::time::timeout(HANDSHAKE_TIMEOUT, rx).await {
+                        Ok(Ok(msg_b_tagged)) => {
+                            if !msg_b_tagged.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
+                                tracing::warn!(target: "seednet", "msg B has wrong prefix");
+                                continue;
+                            }
+                            let msg_b = &msg_b_tagged[NOISE_HANDSHAKE_RESPONDER_PREFIX.len()..];
+
+                            if let Err(e) = initiator.read_message_b(msg_b) {
+                                tracing::warn!(target: "seednet", error = %e, "read_message_b failed");
                                 continue;
                             }
 
-                            // Only skip if we have BOTH an addr→peer mapping AND
-                            // an active session. If the session dropped (heartbeat
-                            // timeout, etc.) we must re-handshake.
-                            let already_connected = addr_index_dht
-                                .get(&TransportAddr::Udp(addr))
-                                .map(|peer_id| sessions_dht.contains_key(&*peer_id))
-                                .unwrap_or(false);
-
-                            if already_connected {
-                                tracing::debug!(target: "seednet", addr = %addr, "peer already connected, skipping");
-                                continue;
-                            }
-
-                            // Clean up stale addr_index entry if session is gone.
-                            if let Some(peer_id) =
-                                addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r)
-                                && !sessions_dht.contains_key(&peer_id)
-                            {
-                                addr_index_dht.remove(&TransportAddr::Udp(addr));
-                                tracing::debug!(target: "seednet", addr = %addr, "cleaned stale addr_index entry, will re-handshake");
-                            }
-
-                            tracing::info!(target: "seednet", addr = %addr, "initiating handshake to discovered peer");
-
-                            let mut initiator = match InitiatorHandshake::new(
-                                &network_secret_dht,
-                                &device_keys_dht,
-                            ) {
-                                Ok(i) => i,
+                            let init_result = match initiator.finish(&[]) {
+                                Ok(r) => r,
                                 Err(e) => {
-                                    tracing::warn!(target: "seednet", error = %e, "initiator create failed");
+                                    tracing::warn!(target: "seednet", error = %e, "initiator finish failed");
                                     continue;
                                 }
                             };
 
-                            let msg_a = match initiator.write_message_a(&[]) {
-                                Ok(m) => m,
-                                Err(e) => {
-                                    tracing::warn!(target: "seednet", error = %e, "write_message_a failed");
-                                    continue;
-                                }
-                            };
-
-                            let mut tagged_a = NOISE_HANDSHAKE_INITIATOR_PREFIX.to_vec();
-                            tagged_a.extend_from_slice(&msg_a);
-
-                            // Insert the oneshot sender BEFORE send_to so the inbound
-                            // task can never receive msg B and look up a missing entry.
-                            // On send failure the entry is removed before continuing.
-                            // Also skip if a handshake is already in-flight for this addr.
-                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            if let Err(e) = udp_dht
+                                .send_to(&init_result.msg_bytes, TransportAddr::Udp(addr))
+                                .await
                             {
-                                let mut pending = pending_dht.write().await;
-                                if pending.contains_key(&addr) {
-                                    tracing::debug!(target: "seednet", addr = %addr, "handshake already in flight, skipping");
-                                    continue;
-                                }
-                                pending.insert(addr, tx);
-                            }
-
-                            if let Err(e) =
-                                udp_dht.send_to(&tagged_a, TransportAddr::Udp(addr)).await
-                            {
-                                let mut pending = pending_dht.write().await;
-                                pending.remove(&addr);
-                                tracing::warn!(target: "seednet", error = %e, "send msg A failed");
+                                tracing::warn!(target: "seednet", error = %e, "send msg C failed");
                                 continue;
                             }
 
-                            tracing::debug!(target: "seednet", addr = %addr, "msg A sent, waiting for msg B");
+                            let remote_static = *init_result.transport.remote_static_key();
+                            let peer_id = PeerId::from_bytes(remote_static);
 
-                            match tokio::time::timeout(HANDSHAKE_TIMEOUT, rx).await {
-                                Ok(Ok(msg_b_tagged)) => {
-                                    if !msg_b_tagged.starts_with(NOISE_HANDSHAKE_RESPONDER_PREFIX) {
-                                        tracing::warn!(target: "seednet", "msg B has wrong prefix");
-                                        continue;
-                                    }
-                                    let msg_b =
-                                        &msg_b_tagged[NOISE_HANDSHAKE_RESPONDER_PREFIX.len()..];
+                            if peer_id == our_peer_id_dht {
+                                tracing::debug!(target: "seednet", "discovered ourselves, ignoring");
+                                continue;
+                            }
 
-                                    if let Err(e) = initiator.read_message_b(msg_b) {
-                                        tracing::warn!(target: "seednet", error = %e, "read_message_b failed");
-                                        continue;
-                                    }
+                            tracing::info!(
+                                target: "seednet",
+                                peer = %peer_id.short(),
+                                addr = %addr,
+                                "handshake completed (initiator)"
+                            );
 
-                                    let init_result = match initiator.finish(&[]) {
-                                        Ok(r) => r,
-                                        Err(e) => {
-                                            tracing::warn!(target: "seednet", error = %e, "initiator finish failed");
-                                            continue;
+                            // Direct connection succeeded — remove any relay path
+                            // that was set up as a fallback.
+                            if relay_paths_dht.remove(&peer_id).is_some() {
+                                tracing::info!(
+                                    target: "seednet",
+                                    peer = %peer_id.short(),
+                                    "upgraded from relay to direct connection"
+                                );
+                            }
+
+                            sessions_dht.insert(
+                                peer_id,
+                                PeerSession {
+                                    transport: init_result.transport,
+                                    underlay: TransportAddr::Udp(addr),
+                                },
+                            );
+                            addr_index_dht.insert(TransportAddr::Udp(addr), peer_id);
+
+                            let overlay = derive_overlay_addr(&peer_id);
+                            let mut rt = routing_table_dht.write().await;
+                            rt.add_route(overlay, peer_id);
+                            drop(rt);
+
+                            // Send our SessionInit with current public addr.
+                            let our_public = *stun_addr_dht.read().await;
+                            let si_bytes =
+                                seednet_peer::message::serialize_message(&Message::SessionInit {
+                                    peer_id: si_peer_id_dht,
+                                    overlay: si_overlay_dht,
+                                    overlay_ipv6: Some(si_overlay_ipv6_dht.octets()),
+                                    hostname: si_hostname_dht.clone(),
+                                    public_addr: our_public,
+                                });
+                            if let Some(mut session) = sessions_dht.get_mut(&peer_id)
+                                && let Ok(enc) = session.transport.encrypt(&si_bytes)
+                            {
+                                let _ = udp_dht.send_to(&enc, TransportAddr::Udp(addr)).await;
+                            }
+
+                            // Advertise relay capability and send peer directory.
+                            if can_relay_dht && let Some(our_pub) = *stun_addr_dht.read().await {
+                                let announce = seednet_peer::message::serialize_message(
+                                    &Message::RelayAnnounce {
+                                        relay_peer_id: our_peer_id_relay_dht,
+                                        public_addr: our_pub,
+                                    },
+                                );
+                                if let Some(mut session) = sessions_dht.get_mut(&peer_id)
+                                    && let Ok(enc) = session.transport.encrypt(&announce)
+                                {
+                                    let _ = udp_dht.send_to(&enc, TransportAddr::Udp(addr)).await;
+                                }
+
+                                let entries: Vec<(PeerId, SocketAddr)> = sessions_dht
+                                    .iter()
+                                    .filter(|e| *e.key() != peer_id)
+                                    .filter_map(|e| {
+                                        if let TransportAddr::Udp(a) = e.underlay {
+                                            Some((*e.key(), a))
+                                        } else {
+                                            None
                                         }
-                                    };
-
-                                    if let Err(e) = udp_dht
-                                        .send_to(&init_result.msg_bytes, TransportAddr::Udp(addr))
-                                        .await
-                                    {
-                                        tracing::warn!(target: "seednet", error = %e, "send msg C failed");
-                                        continue;
-                                    }
-
-                                    let remote_static = *init_result.transport.remote_static_key();
-                                    let peer_id = PeerId::from_bytes(remote_static);
-
-                                    if peer_id == our_peer_id_dht {
-                                        tracing::debug!(target: "seednet", "discovered ourselves, ignoring");
-                                        continue;
-                                    }
-
-                                    tracing::info!(
-                                        target: "seednet",
-                                        peer = %peer_id.short(),
-                                        addr = %addr,
-                                        "handshake completed (initiator)"
-                                    );
-
-                                    sessions_dht.insert(
-                                        peer_id,
-                                        PeerSession {
-                                            transport: init_result.transport,
-                                            underlay: TransportAddr::Udp(addr),
-                                        },
-                                    );
-                                    addr_index_dht.insert(TransportAddr::Udp(addr), peer_id);
-
-                                    let overlay = derive_overlay_addr(&peer_id);
-                                    let mut rt = routing_table_dht.write().await;
-                                    rt.add_route(overlay, peer_id);
-                                    drop(rt);
-
-                                    // Send our SessionInit with current public addr.
-                                    let our_public = *stun_addr_dht.read().await;
-                                    let si_bytes = seednet_peer::message::serialize_message(
-                                        &Message::SessionInit {
-                                            peer_id: si_peer_id_dht,
-                                            overlay: si_overlay_dht,
-                                            overlay_ipv6: Some(si_overlay_ipv6_dht.octets()),
-                                            hostname: si_hostname_dht.clone(),
-                                            public_addr: our_public,
-                                        },
+                                    })
+                                    .collect();
+                                if !entries.is_empty() {
+                                    let dir = seednet_peer::message::serialize_message(
+                                        &Message::PeerDirectory { entries },
                                     );
                                     if let Some(mut session) = sessions_dht.get_mut(&peer_id)
-                                        && let Ok(enc) = session.transport.encrypt(&si_bytes)
+                                        && let Ok(enc) = session.transport.encrypt(&dir)
                                     {
                                         let _ =
                                             udp_dht.send_to(&enc, TransportAddr::Udp(addr)).await;
                                     }
+                                }
+                            }
 
-                                    // Advertise relay capability if applicable.
-                                    if can_relay_dht
-                                        && let Some(our_pub) = *stun_addr_dht.read().await
+                            let _peer = peer_mgr_dht.discover(peer_id, addr).await;
+                            let _ = peer_mgr_dht
+                                .transition_peer(&peer_id, PeerState::Connecting)
+                                .await;
+                            let _ = peer_mgr_dht
+                                .transition_peer(&peer_id, PeerState::Handshaking)
+                                .await;
+                            let _ = peer_mgr_dht
+                                .transition_peer(&peer_id, PeerState::Connected)
+                                .await;
+
+                            tracing::info!(
+                                target: "seednet",
+                                peer = %peer_id.short(),
+                                overlay = %overlay,
+                                addr = %addr,
+                                "peer route registered (initiator)"
+                            );
+                        }
+                        Ok(Err(_)) => {
+                            tracing::warn!(target: "seednet", addr = %addr, "msg B channel dropped");
+                        }
+                        Err(_) => {
+                            let mut pending = pending_dht.write().await;
+                            pending.remove(&addr);
+                            tracing::warn!(
+                                target: "seednet",
+                                addr = %addr,
+                                "initiator handshake timed out waiting for msg B"
+                            );
+                            drop(pending);
+
+                            // Request relay through every known relay candidate.
+                            // This lets data flow before (or instead of) direct.
+                            // We must know the remote peer_id to request relay;
+                            // look it up from addr_index (set during prior attempts).
+                            let maybe_peer_id =
+                                addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r);
+                            if let Some(target_id) = maybe_peer_id {
+                                for relay_entry in relay_candidates_dht.iter() {
+                                    let relay_id = *relay_entry.key();
+                                    if relay_id == target_id {
+                                        continue; // don't relay to yourself
+                                    }
+                                    if let Some(mut relay_session) = sessions_dht.get_mut(&relay_id)
                                     {
-                                        let announce = seednet_peer::message::serialize_message(
-                                            &Message::RelayAnnounce {
-                                                relay_peer_id: our_peer_id_relay_dht,
-                                                public_addr: our_pub,
+                                        let req = seednet_peer::message::serialize_message(
+                                            &Message::RelayRequest {
+                                                dst_peer_id: target_id,
                                             },
                                         );
-                                        if let Some(mut session) = sessions_dht.get_mut(&peer_id)
-                                            && let Ok(enc) = session.transport.encrypt(&announce)
-                                        {
-                                            let _ = udp_dht
-                                                .send_to(&enc, TransportAddr::Udp(addr))
-                                                .await;
+                                        if let Ok(enc) = relay_session.transport.encrypt(&req) {
+                                            let raddr = relay_session.underlay.clone();
+                                            drop(relay_session);
+                                            let _ = udp_dht.send_to(&enc, raddr).await;
+                                            tracing::info!(
+                                                target: "seednet",
+                                                peer = %target_id.short(),
+                                                relay = %relay_id.short(),
+                                                "requested relay after direct timeout"
+                                            );
                                         }
-                                    }
-
-                                    let _peer = peer_mgr_dht.discover(peer_id, addr).await;
-                                    let _ = peer_mgr_dht
-                                        .transition_peer(&peer_id, PeerState::Connecting)
-                                        .await;
-                                    let _ = peer_mgr_dht
-                                        .transition_peer(&peer_id, PeerState::Handshaking)
-                                        .await;
-                                    let _ = peer_mgr_dht
-                                        .transition_peer(&peer_id, PeerState::Connected)
-                                        .await;
-
-                                    tracing::info!(
-                                        target: "seednet",
-                                        peer = %peer_id.short(),
-                                        overlay = %overlay,
-                                        addr = %addr,
-                                        "peer route registered (initiator)"
-                                    );
-                                }
-                                Ok(Err(_)) => {
-                                    tracing::warn!(target: "seednet", addr = %addr, "msg B channel dropped");
-                                }
-                                Err(_) => {
-                                    let mut pending = pending_dht.write().await;
-                                    pending.remove(&addr);
-                                    tracing::warn!(
-                                        target: "seednet",
-                                        addr = %addr,
-                                        "initiator handshake timed out waiting for msg B"
-                                    );
-                                    drop(pending);
-
-                                    // If we know the peer's STUN public addr, attempt hole-punch.
-                                    let peer_id_candidate =
-                                        addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r);
-                                    if let Some(pid) = peer_id_candidate
-                                        && let Some(peer) = peer_mgr_dht.get(&pid)
-                                        && let Some(pub_addr) = peer.public_addr().await
-                                        && pub_addr != addr
-                                    {
-                                        tracing::info!(target: "seednet", addr = %pub_addr, peer = %pid.short(), "attempting hole-punch");
-                                        let token = rand::thread_rng().r#gen::<u64>();
-                                        let probe = [
-                                            seednet_common::HOLE_PUNCH_PROBE_PREFIX,
-                                            &seednet_peer::message::serialize_message(
-                                                &Message::HolePunchProbe { token },
-                                            ),
-                                        ]
-                                        .concat();
-                                        let _ = udp_dht
-                                            .send_to(&probe, TransportAddr::Udp(pub_addr))
-                                            .await;
-                                        tokio::time::sleep(Duration::from_millis(300)).await;
                                     }
                                 }
                             }
+
+                            // Also attempt hole-punch if we know the peer's STUN addr.
+                            let peer_id_candidate =
+                                addr_index_dht.get(&TransportAddr::Udp(addr)).map(|r| *r);
+                            if let Some(pid) = peer_id_candidate
+                                && let Some(peer) = peer_mgr_dht.get(&pid)
+                                && let Some(pub_addr) = peer.public_addr().await
+                                && pub_addr != addr
+                            {
+                                tracing::info!(target: "seednet", addr = %pub_addr, peer = %pid.short(), "attempting hole-punch");
+                                let token = rand::thread_rng().r#gen::<u64>();
+                                let probe = [
+                                    seednet_common::HOLE_PUNCH_PROBE_PREFIX,
+                                    &seednet_peer::message::serialize_message(
+                                        &Message::HolePunchProbe { token },
+                                    ),
+                                ]
+                                .concat();
+                                let _ = udp_dht.send_to(&probe, TransportAddr::Udp(pub_addr)).await;
+                                tokio::time::sleep(Duration::from_millis(300)).await;
+                            }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(target: "seednet", error = %e, "DHT lookup error");
-                    }
-                }
-            }
-        });
+                } // end for addr in peers
+            } // end loop
+        }); // end discovery_handle
 
         let stun_addr_announce = stun_public_addr.clone();
         let announce_handle = tokio::spawn(async move {

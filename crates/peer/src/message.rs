@@ -52,6 +52,13 @@ pub enum Message {
         relay_peer_id: PeerId,
         public_addr: SocketAddr,
     },
+    /// Relay-capable node sends a directory of all known peers so new
+    /// joiners can request relay immediately without waiting for DHT or
+    /// a direct handshake attempt.
+    PeerDirectory {
+        /// (peer_id, public_addr) pairs known to the sender.
+        entries: Vec<(PeerId, SocketAddr)>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

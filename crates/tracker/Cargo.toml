@@ -1,0 +1,18 @@
+[package]
+name = "seednet-tracker"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "BitTorrent tracker client for SeedNet (HTTP BEP-0003, UDP BEP-0015)"
+
+[dependencies]
+seednet-common = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+reqwest = { workspace = true }
+serde_bencode = { workspace = true }
+serde = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }

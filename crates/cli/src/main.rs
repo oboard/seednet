@@ -57,6 +57,15 @@ enum Command {
         /// Example: --transport udp,tcp,ws
         #[arg(long, default_value = "udp,tcp,ws")]
         transport: String,
+        /// Comma-separated tracker addresses to connect to immediately
+        /// on startup (bypasses DHT discovery latency).
+        /// Example: --tracker 120.25.179.85:31211
+        #[arg(long, default_value = "")]
+        tracker: String,
+        /// Comma-separated BitTorrent tracker URLs (HTTP or UDP).
+        /// Example: --tracker-url udp://tracker.opentrackr.org:1337
+        #[arg(long, default_value = "")]
+        tracker_url: String,
     },
     /// Bring the overlay network down (stops the running daemon).
     Down,
@@ -95,9 +104,43 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
         /// Comma-separated transport protocols.
-        #[arg(long, default_value = "udp")]
+        #[arg(long, default_value = "udp,tcp,ws")]
         transport: String,
+        /// Comma-separated direct peer addresses.
+        #[arg(long, default_value = "")]
+        tracker: String,
+        /// Comma-separated BitTorrent tracker URLs.
+        #[arg(long, default_value = "")]
+        tracker_url: String,
     },
+}
+
+fn parse_trackers(s: &str) -> Vec<std::net::SocketAddr> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split(',')
+        .filter_map(|t| {
+            let addr = t.trim();
+            match addr.parse::<std::net::SocketAddr>() {
+                Ok(a) => Some(a),
+                Err(_) => {
+                    eprintln!("invalid tracker address '{addr}', ignoring");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+fn parse_tracker_urls(s: &str) -> Vec<String> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    s.split(',')
+        .map(|u| u.trim().to_string())
+        .filter(|u| !u.is_empty())
+        .collect()
 }
 
 fn parse_transports(s: &str) -> Vec<seednet_transport::TransportKind> {
@@ -151,17 +194,23 @@ fn main() -> Result<()> {
             seed,
             port,
             transport,
+            tracker,
+            tracker_url,
         } => {
             let state_dir_path = cli.state_dir;
             let seed = Seed::from_passphrase(&seed);
             let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
             let transports = parse_transports(&transport);
+            let direct_peers = parse_trackers(&tracker);
+            let tracker_urls = parse_tracker_urls(&tracker_url);
             rt.block_on(commands::up(
                 &state_dir,
                 &seed,
                 port,
                 state_dir_path.as_deref(),
                 transports,
+                direct_peers,
+                tracker_urls,
             ))?;
         }
         Command::List => {
@@ -181,11 +230,22 @@ fn main() -> Result<()> {
             seed,
             port,
             transport,
+            tracker,
+            tracker_url,
         } => {
             let seed = Seed::from_passphrase(&seed);
             let port = port.unwrap_or_else(|| derive_port(&derive_network_secret(&seed)));
             let transports = parse_transports(&transport);
-            rt.block_on(commands::daemon(&state_dir, &seed, port, transports))?;
+            let direct_peers = parse_trackers(&tracker);
+            let tracker_urls = parse_tracker_urls(&tracker_url);
+            rt.block_on(commands::daemon(
+                &state_dir,
+                &seed,
+                port,
+                transports,
+                direct_peers,
+                tracker_urls,
+            ))?;
         }
     }
 

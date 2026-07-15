@@ -23,6 +23,8 @@ pub async fn up(
     port: u16,
     explicit_state_dir: Option<&Path>,
     transports: Vec<seednet_transport::TransportKind>,
+    direct_peers: Vec<std::net::SocketAddr>,
+    tracker_urls: Vec<String>,
 ) -> Result<()> {
     // Already running?
     if let Some(pid) = state_dir.read_pid()? {
@@ -57,12 +59,22 @@ pub async fn up(
             .map(|k| format!("{k:?}").to_ascii_lowercase())
             .collect::<Vec<_>>()
             .join(",");
+        let direct_peers_str = direct_peers
+            .iter()
+            .map(|a| a.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let tracker_url_str = tracker_urls.join(",");
         cmd.arg("_daemon")
             .arg(&seed_str)
             .arg("--port")
             .arg(port.to_string())
             .arg("--transport")
             .arg(&transport_str)
+            .arg("--tracker")
+            .arg(&direct_peers_str)
+            .arg("--tracker-url")
+            .arg(&tracker_url_str)
             .arg("-v")
             .arg("--state-dir")
             .arg(state_dir.path())
@@ -240,10 +252,18 @@ pub async fn daemon(
     seed: &Seed,
     port: u16,
     transports: Vec<seednet_transport::TransportKind>,
+    direct_peers: Vec<std::net::SocketAddr>,
+    tracker_urls: Vec<String>,
 ) -> Result<()> {
     let mut config = SeedNetConfig::new(seed.clone(), port, state_dir.clone());
     if !transports.is_empty() {
         config.transports = transports;
+    }
+    if !direct_peers.is_empty() {
+        config.direct_peers = direct_peers;
+    }
+    if !tracker_urls.is_empty() {
+        config.tracker_urls = tracker_urls;
     }
     let engine = SeedNetEngine::new(config)?;
 
