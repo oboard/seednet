@@ -626,7 +626,9 @@ fn process_alive(pid: u32) -> bool {
 // launchd integration (macOS only)
 // ---------------------------------------------------------------------------
 
+#[cfg(target_os = "macos")]
 const LAUNCHD_LABEL: &str = "fun.oboard.seednet";
+#[cfg(target_os = "macos")]
 const LAUNCHD_PLIST: &str = "/Library/LaunchDaemons/fun.oboard.seednet.plist";
 
 #[cfg(target_os = "macos")]
