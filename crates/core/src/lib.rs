@@ -1075,22 +1075,79 @@ impl SeedNetEngine {
                                                 payload,
                                             }) => {
                                                 if dst_peer_id == our_peer_id_relay {
-                                                    // Data is for us — treat as normal inbound data.
-                                                    // payload is encrypted with our session key from the original sender.
-                                                    // We can't decrypt it here (we don't have the sender's session),
-                                                    // so just write it to TUN directly (it's raw IP if direct, or needs
-                                                    // another decrypt layer). For now log and skip.
-                                                    tracing::debug!(target: "seednet", from = %from, "relayed data for self (unsupported double-decrypt path)");
+                                                    // Data relayed to us: the payload is a raw IP
+                                                    // packet wrapped by the relay in a relay session.
+                                                    // Since the relay just forwarded what the sender
+                                                    // sent (already decrypted from outer relay session
+                                                    // by the relay node), the payload here is the
+                                                    // sender's Noise-encrypted Data message.
+                                                    // Try to decrypt with the sender's session.
+                                                    let sender_id =
+                                                        addr_index_in.get(&from).map(|r| *r);
+                                                    if let Some(sid) = sender_id {
+                                                        if let Some(mut session) =
+                                                            sessions_in.get_mut(&sid)
+                                                        {
+                                                            if let Ok(plain) =
+                                                                session.transport.decrypt(&payload)
+                                                            {
+                                                                drop(session);
+                                                                if let Ok(
+                                                                    Message::Data(ip_pkt),
+                                                                ) = seednet_peer::message::deserialize_message(
+                                                                    &plain,
+                                                                ) {
+                                                                    let mut w =
+                                                                        tun_writer_in.lock().await;
+                                                                    let _ = w.send(&ip_pkt).await;
+                                                                    tracing::debug!(target: "seednet", bytes = ip_pkt.len(), "relayed packet written to TUN");
+                                                                }
+                                                            }
+                                                        }
+                                                    }
                                                 } else if can_relay_in {
-                                                    // We are the relay: forward to dst.
-                                                    if let Some(dst_session) =
-                                                        sessions_in.get(&dst_peer_id)
-                                                    {
-                                                        let addr = dst_session.underlay.clone();
-                                                        drop(dst_session);
-                                                        let _ =
-                                                            udp_in.send_to(&payload, addr).await;
-                                                        tracing::debug!(target: "seednet", dst = %dst_peer_id.short(), "relayed packet forwarded");
+                                                    // We are the relay: decrypt from sender's session,
+                                                    // re-encrypt with destination's session, forward.
+                                                    let sender_id =
+                                                        addr_index_in.get(&from).map(|r| *r);
+                                                    let inner = if let Some(sid) = sender_id {
+                                                        sessions_in.get_mut(&sid).and_then(
+                                                            |mut s| {
+                                                                s.transport.decrypt(&payload).ok()
+                                                            },
+                                                        )
+                                                    } else {
+                                                        None
+                                                    };
+                                                    if let Some(decrypted) = inner {
+                                                        if let Some(mut dst_session) =
+                                                            sessions_in.get_mut(&dst_peer_id)
+                                                        {
+                                                            if let Ok(re_enc) = dst_session
+                                                                .transport
+                                                                .encrypt(&decrypted)
+                                                            {
+                                                                let fwd = seednet_peer::message::serialize_message(
+                                                                    &Message::RelayData {
+                                                                        dst_peer_id,
+                                                                        payload: re_enc,
+                                                                    },
+                                                                );
+                                                                if let Ok(outer) = dst_session
+                                                                    .transport
+                                                                    .encrypt(&fwd)
+                                                                {
+                                                                    let addr = dst_session
+                                                                        .underlay
+                                                                        .clone();
+                                                                    drop(dst_session);
+                                                                    let _ = udp_in
+                                                                        .send_to(&outer, addr)
+                                                                        .await;
+                                                                    tracing::debug!(target: "seednet", dst = %dst_peer_id.short(), "relayed packet forwarded (re-encrypted)");
+                                                                }
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }

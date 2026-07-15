@@ -8,6 +8,24 @@ use tokio::sync::RwLock;
 
 use crate::state::{PeerState, StateRecord, TransitionError};
 
+/// How we are currently reaching this peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PathKind {
+    /// Direct UDP/TCP/WS session.
+    Direct,
+    /// Relayed through a third peer.
+    Relay(PeerId),
+}
+
+impl std::fmt::Display for PathKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PathKind::Direct => write!(f, "direct"),
+            PathKind::Relay(id) => write!(f, "relay:{}", id.short()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct PeerInner {
     pub id: PeerId,
@@ -18,6 +36,10 @@ pub struct PeerInner {
     pub public_addr: Option<SocketAddr>,
     pub hostname: String,
     pub state: StateRecord,
+    /// Most recent round-trip latency in milliseconds (None = unknown).
+    pub latency_ms: Option<u32>,
+    /// Current routing path.
+    pub path_kind: PathKind,
 }
 
 #[derive(Debug)]
@@ -38,6 +60,8 @@ impl Peer {
                 public_addr: None,
                 hostname: String::new(),
                 state: StateRecord::new(PeerState::Disconnected),
+                latency_ms: None,
+                path_kind: PathKind::Direct,
             })),
         }
     }
