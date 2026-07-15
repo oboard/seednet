@@ -114,8 +114,17 @@ pub async fn up(
         // Install launchd plist (without RunAtLoad) so params are remembered.
         // After reboot, run `sudo seednet up <seed>` to restart.
         let _ = remove_launchd();
-        match install_launchd(&exe, &seed_str, port, state_dir.path(), &log_path, explicit_state_dir) {
-            Ok(()) => println!("  boot    : plist saved — run `sudo seednet up oboard --port {port}` after reboot"),
+        match install_launchd(
+            &exe,
+            &seed_str,
+            port,
+            state_dir.path(),
+            &log_path,
+            explicit_state_dir,
+        ) {
+            Ok(()) => println!(
+                "  boot    : plist saved — run `sudo seednet up oboard --port {port}` after reboot"
+            ),
             Err(e) => println!("  boot    : plist install failed — {e}"),
         }
 
