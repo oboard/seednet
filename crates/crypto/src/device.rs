@@ -10,7 +10,6 @@
 //! by clamping; this is independent of and does not weaken Ed25519 security.
 
 use ed25519_dalek::SigningKey;
-use rand::RngCore;
 use seednet_common::{PUBLIC_KEY_LEN, PeerId, SECRET_KEY_LEN, SecretKeyBytes};
 use serde::{Deserialize, Serialize};
 
@@ -24,9 +23,7 @@ pub struct DeviceSeedBytes([u8; SECRET_KEY_LEN]);
 impl DeviceSeedBytes {
     /// Generate a fresh, cryptographically random device seed.
     pub fn generate() -> Self {
-        let mut bytes = [0u8; SECRET_KEY_LEN];
-        rand::thread_rng().fill_bytes(&mut bytes);
-        Self(bytes)
+        Self(rand::random::<[u8; SECRET_KEY_LEN]>())
     }
 
     pub const fn from_bytes(bytes: [u8; SECRET_KEY_LEN]) -> Self {

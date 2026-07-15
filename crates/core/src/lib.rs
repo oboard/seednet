@@ -20,8 +20,6 @@ use seednet_routing::RoutingTable;
 use seednet_tun::subnet_mask;
 use seednet_tun::{AsyncTunDevice, TunConfig, platform};
 
-use rand::Rng as _;
-
 use seednet_transport::{MultiTransport, Transport, TransportAddr, UdpTransport};
 use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, RwLock};
@@ -1524,7 +1522,7 @@ impl SeedNetEngine {
                                     && pub_addr != addr
                                 {
                                     tracing::info!(target: "seednet", addr = %pub_addr, peer = %pid.short(), "attempting hole-punch");
-                                    let token = rand::thread_rng().r#gen::<u64>();
+                                    let token = rand::random::<u64>();
                                     let probe = [
                                         seednet_common::HOLE_PUNCH_PROBE_PREFIX,
                                         &seednet_peer::message::serialize_message(

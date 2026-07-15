@@ -67,7 +67,7 @@ impl WsTransport {
         // Drive outbound sends in a background task.
         tokio::spawn(async move {
             while let Some(bytes) = conn_rx.recv().await {
-                if sink.send(WsMessage::Binary(bytes.to_vec())).await.is_err() {
+                if sink.send(WsMessage::Binary(bytes)).await.is_err() {
                     break;
                 }
             }
@@ -121,7 +121,7 @@ async fn accept_loop(listener: TcpListener, tx: RxSender, conns: Arc<ConnMap>) {
                             // Drive outbound sends.
                             tokio::spawn(async move {
                                 while let Some(bytes) = conn_rx.recv().await {
-                                    if sink.send(WsMessage::Binary(bytes.to_vec())).await.is_err() {
+                                    if sink.send(WsMessage::Binary(bytes)).await.is_err() {
                                         break;
                                     }
                                 }
@@ -130,7 +130,7 @@ async fn accept_loop(listener: TcpListener, tx: RxSender, conns: Arc<ConnMap>) {
                             while let Some(msg) = stream.next().await {
                                 match msg {
                                     Ok(WsMessage::Binary(data)) => {
-                                        if tx2.send((Bytes::from(data), peer)).await.is_err() {
+                                        if tx2.send((data, peer)).await.is_err() {
                                             break;
                                         }
                                     }

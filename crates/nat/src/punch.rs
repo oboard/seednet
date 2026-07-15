@@ -7,8 +7,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 use std::time::Instant;
 
-use rand::Rng;
-
 use seednet_common::HOLE_PUNCH_PROBE_PREFIX;
 
 const TOKEN_TTL: Duration = Duration::from_secs(30);
@@ -69,7 +67,7 @@ impl PunchCoordinator {
     /// Generate a fresh random token for a new punch attempt toward `addr`.
     pub fn new_token(&mut self, addr: SocketAddr) -> u64 {
         self.evict_stale();
-        let token: u64 = rand::thread_rng().r#gen();
+        let token: u64 = rand::random();
         self.pending.insert(token, (addr, Instant::now()));
         token
     }

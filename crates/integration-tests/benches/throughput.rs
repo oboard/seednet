@@ -157,7 +157,9 @@ async fn udp_loopback_run(payload_size: usize, packet_count: usize) -> Duration 
     // B receives msg A, sends msg B
     let (data, _) = transport_b.recv_from().await.unwrap();
     assert!(data.starts_with(HS_A_PREFIX));
-    responder.read_message_a(&data[HS_A_PREFIX.len()..]).unwrap();
+    responder
+        .read_message_a(&data[HS_A_PREFIX.len()..])
+        .unwrap();
     let msg_b = responder.write_message_b(&[]).unwrap();
     let mut tagged_b = HS_B_PREFIX.to_vec();
     tagged_b.extend_from_slice(&msg_b);
@@ -198,10 +200,7 @@ async fn udp_loopback_run(payload_size: usize, packet_count: usize) -> Duration 
     let sender = tokio::spawn(async move {
         for _ in 0..packet_count {
             let enc = noise_a.encrypt(&plaintext_clone).unwrap();
-            sock_a
-                .send_to(&enc, addr_b_clone)
-                .await
-                .unwrap();
+            sock_a.send_to(&enc, addr_b_clone).await.unwrap();
         }
     });
 
