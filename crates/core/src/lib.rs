@@ -631,6 +631,38 @@ impl SeedNetEngine {
                                                         sessions_in.insert(peer_id, session);
                                                     }
                                                     addr_index_in.insert(from.clone(), peer_id);
+                                                    // Re-key peer_manager: move from X25519 id to Ed25519 id.
+                                                    if let Some(old_peer) =
+                                                        peer_mgr_in.remove(&old_id)
+                                                    {
+                                                        let addr = old_peer
+                                                            .underlay_addr()
+                                                            .await
+                                                            .unwrap_or(from_sa);
+                                                        let new_peer = peer_mgr_in
+                                                            .discover(peer_id, addr)
+                                                            .await;
+                                                        // Carry over state to Connected.
+                                                        let _ = peer_mgr_in
+                                                            .transition_peer(
+                                                                &peer_id,
+                                                                PeerState::Connecting,
+                                                            )
+                                                            .await;
+                                                        let _ = peer_mgr_in
+                                                            .transition_peer(
+                                                                &peer_id,
+                                                                PeerState::Handshaking,
+                                                            )
+                                                            .await;
+                                                        let _ = peer_mgr_in
+                                                            .transition_peer(
+                                                                &peer_id,
+                                                                PeerState::Connected,
+                                                            )
+                                                            .await;
+                                                        let _ = new_peer; // used above
+                                                    }
                                                     // Remove stale X25519-derived route.
                                                     let stale = derive_overlay_addr(&old_id);
                                                     let mut rt = routing_table_in.write().await;
