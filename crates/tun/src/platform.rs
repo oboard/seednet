@@ -83,17 +83,27 @@ pub async fn configure_interface_full(
             }
 
             // Route the /48 ULA prefix into the TUN.
+            // macOS route(8) requires the fully expanded IPv6 address and -prefixlen.
+            // The /48 ULA prefix occupies the first 3 x 16-bit groups of the address.
+            let o = ipv6.octets();
             let prefix48 = format!(
-                "fd{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}::/48",
-                ipv6.octets()[1],
-                ipv6.octets()[2],
-                ipv6.octets()[3],
-                ipv6.octets()[4],
-                ipv6.octets()[5],
-                ipv6.octets()[6],
+                "{:04x}:{:04x}:{:04x}:0:0:0:0:0",
+                u16::from_be_bytes([o[0], o[1]]),
+                u16::from_be_bytes([o[2], o[3]]),
+                u16::from_be_bytes([o[4], o[5]]),
             );
             let v6_route = tokio::process::Command::new("route")
-                .args(["-q", "-n", "add", "-inet6", &prefix48, "-interface", name])
+                .args([
+                    "-q",
+                    "-n",
+                    "add",
+                    "-inet6",
+                    &prefix48,
+                    "-prefixlen",
+                    "48",
+                    "-interface",
+                    name,
+                ])
                 .output()
                 .await;
             if let Ok(o) = v6_route {

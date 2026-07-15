@@ -36,15 +36,6 @@ pub async fn up(
     let exe = std::env::current_exe().context("could not determine current executable")?;
     let seed_str = String::from_utf8_lossy(seed.as_bytes()).into_owned();
 
-    // TUN creation requires root on macOS/Linux.
-    #[cfg(unix)]
-    if unsafe { libc_getuid() } != 0 {
-        anyhow::bail!(
-            "SeedNet requires root privileges to create a TUN interface.\n\
-             Please run: sudo seednet up"
-        );
-    }
-
     let log_path = state_dir.log_path();
     let log_file = std::fs::OpenOptions::new()
         .create(true)
@@ -56,7 +47,8 @@ pub async fn up(
     cmd.arg("_daemon")
         .arg(&seed_str)
         .arg("--port")
-        .arg(port.to_string());
+        .arg(port.to_string())
+        .arg("-v"); // always run daemon at INFO level so the log is useful
 
     // Forward --state-dir only when it was explicitly set.
     if let Some(dir) = explicit_state_dir {
@@ -517,16 +509,25 @@ fn signal_pid(pid: u32) -> Result<()> {
 unsafe extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: u32, sig: i32) -> i32;
-
-    #[link_name = "getuid"]
-    fn libc_getuid() -> u32;
 }
 
 fn process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     {
         let r = unsafe { libc_kill(pid, 0) };
-        r == 0
+        // r == 0: process exists and we can signal it
+        // EPERM (-1, errno=EPERM): process exists but we lack permission (e.g. root process)
+        if r == 0 {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            r == -1 && unsafe { *libc::__error() } == libc::EPERM
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            r == -1 && unsafe { *libc::__errno_location() } == libc::EPERM
+        }
     }
     #[cfg(not(unix))]
     {

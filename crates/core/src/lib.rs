@@ -224,10 +224,13 @@ impl SeedNetEngine {
             }
         }
 
-        if let Err(e) = dht.announce(&self.infohash, port).await {
+        // Use the STUN-mapped port for DHT announcement so that NATted peers
+        // announce their actual reachable port, not the local bind port.
+        let announce_port = public_addr_init.map(|a| a.port()).unwrap_or(port);
+        if let Err(e) = dht.announce(&self.infohash, announce_port).await {
             tracing::warn!(target: "seednet", error = %e, "DHT announce failed, continuing anyway");
         } else {
-            tracing::info!(target: "seednet", port, "Announced on DHT");
+            tracing::info!(target: "seednet", port = announce_port, "Announced on DHT");
         }
 
         let udp = Arc::new(udp_socket);
@@ -539,11 +542,46 @@ impl SeedNetEngine {
                                             }
                                             Ok(Message::SessionInit {
                                                 peer_id,
+                                                overlay,
                                                 overlay_ipv6,
                                                 hostname,
                                                 public_addr,
-                                                ..
                                             }) => {
+                                                // The handshake keyed the session on the remote's
+                                                // X25519 Noise static key. SessionInit brings the
+                                                // canonical Ed25519 PeerId and the correct overlay.
+                                                // Re-key session + routing table so everything
+                                                // is consistent under the Ed25519 PeerId.
+                                                let x25519_peer_id =
+                                                    addr_index_in.get(&from).map(|r| *r);
+                                                if let Some(old_id) = x25519_peer_id
+                                                    && old_id != peer_id
+                                                {
+                                                    // Move session to canonical peer_id.
+                                                    if let Some((_, session)) =
+                                                        sessions_in.remove(&old_id)
+                                                    {
+                                                        sessions_in.insert(peer_id, session);
+                                                    }
+                                                    addr_index_in.insert(from, peer_id);
+                                                    // Remove stale X25519-derived route.
+                                                    let stale = derive_overlay_addr(&old_id);
+                                                    let mut rt = routing_table_in.write().await;
+                                                    rt.remove_route(&stale);
+                                                    drop(rt);
+                                                }
+                                                // Add correct route under Ed25519 overlay.
+                                                let correct_overlay = OverlayAddr::new(
+                                                    std::net::Ipv4Addr::from(overlay),
+                                                );
+                                                {
+                                                    let mut rt = routing_table_in.write().await;
+                                                    rt.add_route(correct_overlay, peer_id);
+                                                }
+                                                tracing::info!(target: "seednet",
+                                                    peer = %peer_id.short(),
+                                                    overlay = %std::net::Ipv4Addr::from(overlay),
+                                                    "peer overlay updated from SessionInit");
                                                 if let Some(peer) = peer_mgr_in.get(&peer_id) {
                                                     if let Some(bytes) = overlay_ipv6 {
                                                         peer.set_overlay_ipv6(
@@ -962,11 +1000,17 @@ impl SeedNetEngine {
             }
         });
 
+        let stun_addr_announce = stun_public_addr.clone();
         let announce_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(DHT_ANNOUNCE_INTERVAL);
             loop {
                 interval.tick().await;
-                if let Err(e) = dht.announce(&infohash, port).await {
+                let announce_port = stun_addr_announce
+                    .read()
+                    .await
+                    .map(|a| a.port())
+                    .unwrap_or(port);
+                if let Err(e) = dht.announce(&infohash, announce_port).await {
                     tracing::debug!(target: "seednet", error = %e, "periodic DHT announce failed");
                 }
             }

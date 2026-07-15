@@ -127,12 +127,6 @@ impl App {
             return;
         }
 
-        #[cfg(unix)]
-        if libc_getuid() != 0 {
-            self.push_log("ERROR: root required for TUN. Run: sudo seednet");
-            return;
-        }
-
         self.push_log(format!("Starting daemon (seed: {})…", obscure(&seed)));
         self.daemon = DaemonState::Starting;
 
@@ -963,11 +957,6 @@ fn strip_ansi(s: &str) -> String {
         }
     }
     out
-}
-
-#[cfg(unix)]
-fn libc_getuid() -> u32 {
-    unsafe { libc::getuid() }
 }
 
 #[cfg(unix)]
