@@ -37,35 +37,61 @@ pub async fn up(
     let seed_str = String::from_utf8_lossy(seed.as_bytes()).into_owned();
     let log_path = state_dir.log_path();
 
-    // On macOS: install launchd service and let RunAtLoad start the daemon.
-    // This avoids having two daemon instances race for the port.
+    // On macOS: spawn the daemon directly in this process's session (so it
+    // inherits the Network Extension context and bypasses corporate filters),
+    // then install a launchd plist so the *user* can re-run `seednet up` after
+    // a reboot to get it back.  We do NOT use RunAtLoad because a System daemon
+    // runs outside the user's Network Extension context and gets filtered.
     #[cfg(target_os = "macos")]
     {
-        // Remove any stale launchd service first (different seed/port).
-        let _ = remove_launchd();
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .context("could not open daemon log file")?;
 
-        install_launchd(
-            &exe,
-            &seed_str,
-            port,
-            state_dir.path(),
-            &log_path,
-            explicit_state_dir,
-        )
-        .context("install launchd service")?;
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("_daemon")
+            .arg(&seed_str)
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("-v")
+            .arg("--state-dir")
+            .arg(state_dir.path())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(log_file);
 
-        // Wait up to 8 s for the daemon (started by launchd RunAtLoad) to write its PID.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        use std::os::unix::process::CommandExt as _;
+        cmd.process_group(0);
+
+        let mut child = cmd.spawn().context("failed to launch SeedNet daemon")?;
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    let log_tail = read_log_tail(&log_path, 20);
+                    anyhow::bail!(
+                        "SeedNet daemon exited immediately ({})\nLog ({}):\n{}",
+                        status,
+                        log_path.display(),
+                        log_tail,
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {}
+            }
             if let Some(pid) = state_dir.read_pid()?
                 && process_alive(pid)
             {
                 break;
             }
             if std::time::Instant::now() > deadline {
+                let _ = child.kill();
                 let log_tail = read_log_tail(&log_path, 20);
                 anyhow::bail!(
-                    "daemon did not start within 8 s\nLog ({}):\n{}",
+                    "daemon did not start within 5 s\nLog ({}):\n{}",
                     log_path.display(),
                     log_tail,
                 );
@@ -84,9 +110,16 @@ pub async fn up(
         println!();
         println!("  seednet list   — show connected peers");
         println!("  seednet down   — stop");
-        println!("  boot    : installed (launchd fun.oboard.seednet)");
 
-        Ok(())
+        // Install launchd plist (without RunAtLoad) so params are remembered.
+        // After reboot, run `sudo seednet up <seed>` to restart.
+        let _ = remove_launchd();
+        match install_launchd(&exe, &seed_str, port, state_dir.path(), &log_path, explicit_state_dir) {
+            Ok(()) => println!("  boot    : plist saved — run `sudo seednet up oboard --port {port}` after reboot"),
+            Err(e) => println!("  boot    : plist install failed — {e}"),
+        }
+
+        return Ok(());
     }
 
     // Non-macOS: spawn the daemon directly.
@@ -617,12 +650,6 @@ fn install_launchd(
         <string>--state-dir</string>
         <string>{state_dir_arg}</string>
     </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/dev/null</string>
     <key>StandardErrorPath</key>
     <string>{log}</string>
 </dict>
