@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" fill="none">
+  <!-- Outer ring -->
+  <circle cx="50" cy="50" r="46" stroke="#22c55e" stroke-width="4"/>
+  <!-- Central seed node -->
+  <circle cx="50" cy="50" r="8" fill="#22c55e"/>
+  <!-- Peer nodes -->
+  <circle cx="50" cy="14" r="5" fill="#4ade80"/>
+  <circle cx="82" cy="32" r="5" fill="#4ade80"/>
+  <circle cx="82" cy="68" r="5" fill="#4ade80"/>
+  <circle cx="50" cy="86" r="5" fill="#4ade80"/>
+  <circle cx="18" cy="68" r="5" fill="#4ade80"/>
+  <circle cx="18" cy="32" r="5" fill="#4ade80"/>
+  <!-- Connection lines from center to peers -->
+  <line x1="50" y1="42" x2="50" y2="19" stroke="#22c55e" stroke-width="2" stroke-opacity="0.7"/>
+  <line x1="57" y1="44" x2="77" y2="36" stroke="#22c55e" stroke-width="2" stroke-opacity="0.7"/>
+  <line x1="57" y1="56" x2="77" y2="64" stroke="#22c55e" stroke-width="2" stroke-opacity="0.7"/>
+  <line x1="50" y1="58" x2="50" y2="81" stroke="#22c55e" stroke-width="2" stroke-opacity="0.7"/>
+  <line x1="43" y1="56" x2="23" y2="64" stroke="#22c55e" stroke-width="2" stroke-opacity="0.7"/>
+  <line x1="43" y1="44" x2="23" y2="36" stroke="#22c55e" stroke-width="2" stroke-opacity="0.7"/>
+  <!-- Cross-peer connections (mesh) -->
+  <line x1="50" y1="14" x2="82" y2="32" stroke="#86efac" stroke-width="1.5" stroke-opacity="0.4"/>
+  <line x1="82" y1="32" x2="82" y2="68" stroke="#86efac" stroke-width="1.5" stroke-opacity="0.4"/>
+  <line x1="82" y1="68" x2="50" y2="86" stroke="#86efac" stroke-width="1.5" stroke-opacity="0.4"/>
+  <line x1="50" y1="86" x2="18" y2="68" stroke="#86efac" stroke-width="1.5" stroke-opacity="0.4"/>
+  <line x1="18" y1="68" x2="18" y2="32" stroke="#86efac" stroke-width="1.5" stroke-opacity="0.4"/>
+  <line x1="18" y1="32" x2="50" y2="14" stroke="#86efac" stroke-width="1.5" stroke-opacity="0.4"/>
+</svg>
