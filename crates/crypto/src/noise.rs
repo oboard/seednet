@@ -38,11 +38,17 @@ struct NonceWindow {
     /// Highest nonce accepted so far; `None` means no packet received yet.
     top: Option<u64>,
     mask: u128, // bit i set ⇒ nonce (top - 1 - i) was seen
+    initialized: bool,
 }
 
 impl NonceWindow {
     /// Returns `true` and records the nonce if it is fresh; `false` if replay.
     fn check_and_insert(&mut self, n: u64) -> bool {
+        if !self.initialized {
+            self.top = n;
+            self.initialized = true;
+            return true;
+        }
         const WIDTH: u64 = 128;
         match self.top {
             None => {

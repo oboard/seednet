@@ -1,6 +1,8 @@
 //! End-to-end test: two devices complete the full Noise XX handshake
 //! and then exchange encrypted messages in both directions.
 
+use std::borrow::Cow;
+
 use seednet_common::{OverlayAddr, PeerId, Seed};
 use seednet_crypto::{
     DeviceKeys, DeviceSeedBytes, InitiatorHandshake, ResponderHandshake, complete_handshake_pair,
@@ -107,7 +109,7 @@ fn full_stack_message_over_wire() {
     let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     // Sender side: build Message → serialize → encrypt → frame
-    let msg = Message::Data(b"overlay packet payload".to_vec());
+    let msg = Message::Data(Cow::Owned(b"overlay packet payload".to_vec()));
     let serialized = message::serialize_message(&msg);
     let encrypted = t_a.encrypt(&serialized).unwrap();
     let framed = frame::encode_frame(&encrypted);
@@ -133,7 +135,7 @@ fn all_message_types_over_wire() {
     let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     let messages = vec![
-        Message::Data(vec![1, 2, 3, 4, 5]),
+        Message::Data(vec![1, 2, 3, 4, 5].into()),
         Message::Heartbeat,
         Message::Ping { sent_ms: 0 },
         Message::Pong { sent_ms: 0 },
@@ -167,7 +169,7 @@ fn tampered_ciphertext_detected() {
 
     let (mut t_a, mut t_b) = complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
-    let msg = Message::Data(b"sensitive data".to_vec());
+    let msg = Message::Data(Cow::Owned(b"sensitive data".to_vec()));
     let serialized = message::serialize_message(&msg);
     let mut encrypted = t_a.encrypt(&serialized).unwrap();
 

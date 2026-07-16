@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -526,6 +527,10 @@ impl SeedNetEngine {
 
         let outbound_handle = tokio::spawn(async move {
             let mut buf = vec![0u8; OVERLAY_MTU + 100];
+            // Pre-allocated buffers reused every iteration to avoid per-packet heap allocations.
+            let mut ser_buf: Vec<u8> = Vec::with_capacity(OVERLAY_MTU + 64);
+            let mut enc_buf: Vec<u8> =
+                Vec::with_capacity(OVERLAY_MTU + 64 + seednet_crypto::TRANSPORT_OVERHEAD);
             loop {
                 match tun_reader.recv(&mut buf).await {
                     Ok(n) => {
@@ -548,14 +553,17 @@ impl SeedNetEngine {
                             let peer_id = *peer_id;
                             drop(rt);
                             if let Some(mut session) = sessions_out.get_mut(&peer_id) {
-                                let wrapped = seednet_peer::message::serialize_message(
-                                    &Message::Data(packet.to_vec()),
+                                seednet_peer::message::serialize_message_into(
+                                    &Message::Data(Cow::Owned(packet.to_vec())),
+                                    &mut ser_buf,
                                 );
-                                match session.transport.encrypt(&wrapped) {
-                                    Ok(encrypted) => {
+                                enc_buf
+                                    .resize(ser_buf.len() + seednet_crypto::TRANSPORT_OVERHEAD, 0);
+                                match session.transport.encrypt_into(&ser_buf, &mut enc_buf) {
+                                    Ok(enc_n) => {
                                         let addr = session.underlay.clone();
                                         drop(session);
-                                        let _ = udp_out.send_to(&encrypted, addr).await;
+                                        let _ = udp_out.send_to(&enc_buf[..enc_n], addr).await;
                                     }
                                     Err(e) => {
                                         tracing::debug!(target: "seednet", peer = %peer_id.short(), error = %e, "encrypt failed");
@@ -565,16 +573,17 @@ impl SeedNetEngine {
                             {
                                 // No direct session; try relay.
                                 if let Some(mut relay_session) = sessions_out.get_mut(&relay_id) {
-                                    let wrapped = seednet_peer::message::serialize_message(
-                                        &Message::Data(packet.to_vec()),
+                                    seednet_peer::message::serialize_message_into(
+                                        &Message::Data(Cow::Owned(packet.to_vec())),
+                                        &mut ser_buf,
                                     );
-                                    if let Ok(inner_enc) = relay_session.transport.encrypt(&wrapped)
+                                    if let Ok(inner_enc) = relay_session.transport.encrypt(&ser_buf)
                                     {
                                         // Wrap in RelayData for the relay node.
                                         let relay_pkt = seednet_peer::message::serialize_message(
                                             &Message::RelayData {
                                                 dst_peer_id: peer_id,
-                                                payload: inner_enc,
+                                                payload: Cow::Owned(inner_enc),
                                             },
                                         );
                                         if let Ok(outer_enc) =
@@ -656,9 +665,14 @@ impl SeedNetEngine {
                 (ResponderHandshake, std::time::Instant),
             > = HashMap::new();
 
+            // Pre-allocated buffers to avoid per-packet heap allocations on the hot path.
+            let mut recv_buf = vec![0u8; seednet_transport::MAX_UDP];
+            let mut plain_buf = vec![0u8; seednet_transport::MAX_UDP];
+
             loop {
-                match udp_in.recv_from().await {
-                    Ok((data, from)) => {
+                match udp_in.recv_into(&mut recv_buf).await {
+                    Ok((n, from)) => {
+                        let data = &recv_buf[..n];
                         let from_sa = from.socket_addr();
 
                         // Evict stale half-open responder handshakes.
@@ -712,7 +726,7 @@ impl SeedNetEngine {
                         if let Some((responder, _)) = pending_responders.remove(&from_sa) {
                             // Ignore anything that looks like a new handshake msg A/B here;
                             // treat it as msg C (will fail to decrypt and be discarded).
-                            match responder.finish(&data) {
+                            match responder.finish(data) {
                                 Ok(resp_result) => {
                                     let remote_static = *resp_result.transport.remote_static_key();
                                     let peer_id = PeerId::from_bytes(remote_static);
@@ -834,10 +848,11 @@ impl SeedNetEngine {
                         // --- data from an established peer ---
                         if let Some(peer_id) = addr_index_in.get(&from).map(|r| *r) {
                             if let Some(mut session) = sessions_in.get_mut(&peer_id) {
-                                match session.transport.decrypt(&data) {
-                                    Ok(decrypted) => {
+                                match session.transport.decrypt_into(data, &mut plain_buf) {
+                                    Ok(plain_n) => {
                                         drop(session);
-                                        match seednet_peer::message::deserialize_message(&decrypted)
+                                        let decrypted = &plain_buf[..plain_n];
+                                        match seednet_peer::message::deserialize_message(decrypted)
                                         {
                                             Ok(Message::Heartbeat) => {
                                                 tracing::trace!(target: "seednet", from = %from, "heartbeat received");
@@ -1186,7 +1201,7 @@ impl SeedNetEngine {
                                                         let fwd = seednet_peer::message::serialize_message(
                                                                     &Message::RelayData {
                                                                         dst_peer_id,
-                                                                        payload: re_enc,
+                                                                        payload: Cow::Owned(re_enc),
                                                                     },
                                                                 );
                                                         if let Ok(outer) =

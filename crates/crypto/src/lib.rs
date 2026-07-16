@@ -20,7 +20,7 @@ pub mod seed;
 
 pub use device::{DeviceKeys, DeviceKeysBytes, DeviceSeedBytes};
 pub use noise::{
-    HandshakeResult, InitiatorHandshake, ResponderHandshake, SecureTransport,
+    HandshakeResult, InitiatorHandshake, ResponderHandshake, SecureTransport, TRANSPORT_OVERHEAD,
     complete_handshake_pair,
 };
 pub use seed::{
