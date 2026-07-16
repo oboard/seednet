@@ -21,6 +21,9 @@ use std::{fmt, net::SocketAddr};
 use async_trait::async_trait;
 use bytes::Bytes;
 
+/// Maximum UDP datagram / frame size for receive buffers.
+pub const MAX_UDP: usize = 65536;
+
 /// The address of a peer, tagged with the transport protocol used to reach it.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TransportAddr {
@@ -89,6 +92,18 @@ pub trait Transport: Send + Sync + 'static {
     /// Receive the next message, returning (payload, sender address).
     /// Blocks until a message arrives.
     async fn recv_from(&self) -> std::io::Result<(Bytes, TransportAddr)>;
+
+    /// Receive the next message into `buf`, returning `(len, sender)`.
+    ///
+    /// The default implementation falls back to `recv_from` and copies into
+    /// `buf`. Implementations that can avoid a heap allocation (e.g. UDP)
+    /// should override this.
+    async fn recv_into(&self, buf: &mut [u8]) -> std::io::Result<(usize, TransportAddr)> {
+        let (bytes, addr) = self.recv_from().await?;
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        Ok((n, addr))
+    }
 
     /// The local address this transport is bound to.
     fn local_addr(&self) -> TransportAddr;

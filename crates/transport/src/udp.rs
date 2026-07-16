@@ -6,10 +6,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::net::UdpSocket;
 
-use crate::{Transport, TransportAddr};
-
-/// Maximum UDP datagram size we'll allocate for receive.
-const MAX_UDP: usize = 65536;
+use crate::{MAX_UDP, Transport, TransportAddr};
 
 /// Thin wrapper around `Arc<UdpSocket>` that implements [`Transport`].
 pub struct UdpTransport {
@@ -41,6 +38,12 @@ impl Transport for UdpTransport {
         let (n, from) = self.socket.recv_from(&mut buf).await?;
         buf.truncate(n);
         Ok((Bytes::from(buf), TransportAddr::Udp(from)))
+    }
+
+    /// Zero-allocation receive: writes directly into the caller's buffer.
+    async fn recv_into(&self, buf: &mut [u8]) -> std::io::Result<(usize, TransportAddr)> {
+        let (n, from) = self.socket.recv_from(buf).await?;
+        Ok((n, TransportAddr::Udp(from)))
     }
 
     fn local_addr(&self) -> TransportAddr {

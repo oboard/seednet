@@ -4,6 +4,7 @@
 //! IP packet sent through the Message::Data path arrives intact on the other
 //! side — the same code path used by the live engine for TUN traffic.
 
+use std::borrow::Cow;
 use std::net::Ipv4Addr;
 
 use seednet_common::Seed;
@@ -44,7 +45,7 @@ fn ip_packet_survives_full_message_pipeline() {
 
     // ── Send side (A → B): same as outbound_handle in core ──────────────
     let wire_bytes = {
-        let wrapped = serialize_message(&Message::Data(ip_packet.clone()));
+        let wrapped = serialize_message(&Message::Data(Cow::Owned(ip_packet.clone())));
         transport_a.encrypt(&wrapped).unwrap()
     };
 
@@ -55,7 +56,8 @@ fn ip_packet_survives_full_message_pipeline() {
     match recovered {
         Message::Data(payload) => {
             assert_eq!(
-                payload, ip_packet,
+                &*payload,
+                ip_packet.as_slice(),
                 "IP packet must arrive byte-for-byte intact"
             );
             // Verify destination IP is preserved.
@@ -114,11 +116,11 @@ fn various_packet_sizes_survive() {
         );
 
         let wire = t_a
-            .encrypt(&serialize_message(&Message::Data(pkt.clone())))
+            .encrypt(&serialize_message(&Message::Data(Cow::Owned(pkt.clone()))))
             .unwrap();
         let dec = t_b.decrypt(&wire).unwrap();
         match deserialize_message(&dec).unwrap() {
-            Message::Data(received) => assert_eq!(received, pkt, "size={size}"),
+            Message::Data(received) => assert_eq!(&*received, pkt.as_slice(), "size={size}"),
             other => panic!("size={size}: expected Data, got {other:?}"),
         }
     }

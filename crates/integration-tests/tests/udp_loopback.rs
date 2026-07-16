@@ -8,6 +8,7 @@
 //! message path using the lower-level crypto + framing primitives directly,
 //! simulating what the outbound/inbound tasks do.
 
+use std::borrow::Cow;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
@@ -108,7 +109,7 @@ async fn noise_handshake_and_data_over_loopback_udp() {
 
     // ── A sends an overlay IP packet to B ────────────────────────────────
     let ip_packet = make_ipv4_icmp(overlay_a.ip(), overlay_b.ip());
-    let wrapped = serialize_message(&Message::Data(ip_packet.clone()));
+    let wrapped = serialize_message(&Message::Data(Cow::Owned(ip_packet.clone())));
     let encrypted = transport_a.encrypt(&wrapped).unwrap();
     sock_a.send_to(&encrypted, addr_b).await.unwrap();
 
@@ -122,7 +123,7 @@ async fn noise_handshake_and_data_over_loopback_udp() {
 
     match msg {
         Message::Data(payload) => {
-            assert_eq!(payload, ip_packet, "IP packet arrived intact");
+            assert_eq!(&*payload, ip_packet.as_slice(), "IP packet arrived intact");
             assert_eq!(&payload[12..16], &overlay_a.ip().octets(), "src IP correct");
             assert_eq!(&payload[16..20], &overlay_b.ip().octets(), "dst IP correct");
         }
@@ -131,7 +132,7 @@ async fn noise_handshake_and_data_over_loopback_udp() {
 
     // ── B sends reply to A ────────────────────────────────────────────────
     let reply = make_ipv4_icmp(overlay_b.ip(), overlay_a.ip());
-    let wrapped_reply = serialize_message(&Message::Data(reply.clone()));
+    let wrapped_reply = serialize_message(&Message::Data(Cow::Owned(reply.clone())));
     let enc_reply = transport_b.encrypt(&wrapped_reply).unwrap();
     sock_b.send_to(&enc_reply, addr_a).await.unwrap();
 
@@ -142,7 +143,7 @@ async fn noise_handshake_and_data_over_loopback_udp() {
     let dec_reply = transport_a.decrypt(&buf[..n]).unwrap();
     match deserialize_message(&dec_reply).unwrap() {
         Message::Data(payload) => {
-            assert_eq!(payload, reply, "reply arrived intact");
+            assert_eq!(&*payload, reply.as_slice(), "reply arrived intact");
         }
         other => panic!("expected Data reply, got {other:?}"),
     }

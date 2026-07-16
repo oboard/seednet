@@ -15,4 +15,5 @@ tokio = { workspace = true, features = ["sync", "time", "net", "io-util", "macro
 tracing = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
+serde_bytes = { workspace = true }
 postcard = { workspace = true }

@@ -272,7 +272,7 @@ mod tests {
         let (mut t_a, mut t_b) =
             complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
-        let msg = Message::Data(b"hello overlay".to_vec());
+        let msg = Message::Data(b"hello overlay".to_vec().into());
         let payload = message::serialize_message(&msg);
         let encrypted: Vec<u8> = t_a.encrypt(&payload).unwrap();
         let framed = frame::encode_frame(&encrypted);
@@ -298,7 +298,7 @@ mod tests {
     #[test]
     fn serialize_deserialize_messages() {
         let cases = vec![
-            Message::Data(vec![1, 2, 3]),
+            Message::Data(vec![1, 2, 3].into()),
             Message::Heartbeat,
             Message::Ping { sent_ms: 0 },
             Message::Pong { sent_ms: 0 },

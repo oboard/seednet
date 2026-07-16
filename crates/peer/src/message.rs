@@ -2,6 +2,7 @@
 //!
 //! Every message is serialized with `postcard` (compact, no-schema).
 
+use std::borrow::Cow;
 use std::net::SocketAddr;
 
 use seednet_common::{OverlayAddr, PeerId};
@@ -9,7 +10,10 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Message {
-    Data(Vec<u8>),
+    /// Raw IP packet payload.
+    /// Use `Cow::Borrowed` on the send path to avoid cloning the TUN buffer.
+    /// Deserializing always yields `Cow::Owned`.
+    Data(#[serde(with = "serde_cow_bytes")] Cow<'static, [u8]>),
     Heartbeat,
     /// Latency probe; recipient echoes back with Pong.
     Ping {
@@ -52,7 +56,8 @@ pub enum Message {
     /// `payload` is already Noise-encrypted — relay never decrypts it.
     RelayData {
         dst_peer_id: PeerId,
-        payload: Vec<u8>,
+        #[serde(with = "serde_cow_bytes")]
+        payload: Cow<'static, [u8]>,
     },
     /// Broadcast by relay-capable nodes to advertise their public address.
     RelayAnnounce {
@@ -66,6 +71,24 @@ pub enum Message {
         /// (peer_id, public_addr) pairs known to the sender.
         entries: Vec<(PeerId, SocketAddr)>,
     },
+}
+
+/// Serde shim: serialize `Cow<'static, [u8]>` as a byte sequence (same wire
+/// format as `Vec<u8>`), and deserialize into the owned variant so the result
+/// is independent of the input buffer.
+mod serde_cow_bytes {
+    use std::borrow::Cow;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use serde_bytes::ByteBuf;
+
+    pub fn serialize<S: Serializer>(cow: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        serde_bytes::Bytes::new(cow).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Cow<'static, [u8]>, D::Error> {
+        ByteBuf::deserialize(d).map(|b| Cow::Owned(b.into_vec()))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +105,14 @@ pub struct OutboundMessage {
 
 pub fn serialize_message(msg: &Message) -> Vec<u8> {
     postcard::to_allocvec(msg).expect("postcard serialize")
+}
+
+/// Serialize `msg` into `buf` (cleared first), reusing its allocation.
+/// Prefer this over `serialize_message` on hot paths to avoid per-call heap
+/// allocation.
+pub fn serialize_message_into(msg: &Message, buf: &mut Vec<u8>) {
+    buf.clear();
+    postcard::to_io(msg, buf).expect("postcard serialize");
 }
 
 pub fn deserialize_message(data: &[u8]) -> Result<Message, postcard::Error> {
