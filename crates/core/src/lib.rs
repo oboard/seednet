@@ -1008,7 +1008,17 @@ impl SeedNetEngine {
                                                         p.set_public_addr(*pub_addr).await;
 
                                                         if !sessions_in.contains_key(pid) {
-                                                            // Not yet connected — request relay immediately.
+                                                            // Pre-populate the relay path and routing table
+                                                            // so that TUN packets destined for this peer can
+                                                            // be forwarded before RelayReady arrives.
+                                                            relay_paths_in.insert(*pid, rid);
+                                                            let overlay = derive_overlay_addr(pid);
+                                                            {
+                                                                let mut rt = routing_table_in.write().await;
+                                                                rt.add_route(overlay, *pid);
+                                                            }
+
+                                                            // Request relay immediately.
                                                             if let Some(mut rsession) =
                                                                 sessions_in.get_mut(&rid)
                                                             {
@@ -1090,11 +1100,19 @@ impl SeedNetEngine {
                                                         addr_index_in.get(&from).map(|r| *r);
                                                     if let Some(rid) = relay_id {
                                                         relay_paths_in.insert(dst_peer_id, rid);
+                                                        // Ensure the routing table has an entry for the
+                                                        // requesting peer so TUN packets can be forwarded.
+                                                        let overlay = derive_overlay_addr(&dst_peer_id);
+                                                        {
+                                                            let mut rt = routing_table_in.write().await;
+                                                            rt.add_route(overlay, dst_peer_id);
+                                                        }
                                                         tracing::info!(
                                                             target: "seednet",
                                                             peer = %dst_peer_id.short(),
                                                             relay = %rid.short(),
-                                                            "relay path recorded (as destination)"
+                                                            overlay = %overlay,
+                                                            "relay path recorded (as destination), route added"
                                                         );
                                                     }
                                                 }
@@ -1104,7 +1122,13 @@ impl SeedNetEngine {
                                                 dst_peer_id,
                                             }) => {
                                                 relay_paths_in.insert(dst_peer_id, relay_peer_id);
-                                                tracing::info!(target: "seednet", dst = %dst_peer_id.short(), relay = %relay_peer_id.short(), "relay path established");
+                                                // Ensure TUN packets can reach dst via the routing table.
+                                                let overlay = derive_overlay_addr(&dst_peer_id);
+                                                {
+                                                    let mut rt = routing_table_in.write().await;
+                                                    rt.add_route(overlay, dst_peer_id);
+                                                }
+                                                tracing::info!(target: "seednet", dst = %dst_peer_id.short(), relay = %relay_peer_id.short(), overlay = %overlay, "relay path established, route added");
                                             }
                                             Ok(Message::RelayData {
                                                 dst_peer_id,

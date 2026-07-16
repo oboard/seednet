@@ -35,7 +35,8 @@ const NONCE_LEN: usize = 8;
 /// that old is effectively lost anyway.
 #[derive(Debug, Default)]
 struct NonceWindow {
-    top: u64,
+    /// Highest nonce accepted so far; `None` means no packet received yet.
+    top: Option<u64>,
     mask: u128, // bit i set ⇒ nonce (top - 1 - i) was seen
 }
 
@@ -43,27 +44,38 @@ impl NonceWindow {
     /// Returns `true` and records the nonce if it is fresh; `false` if replay.
     fn check_and_insert(&mut self, n: u64) -> bool {
         const WIDTH: u64 = 128;
-        if n > self.top {
-            let shift = n - self.top;
-            if shift >= WIDTH {
-                self.mask = 0;
-            } else {
-                self.mask <<= shift;
-                self.mask |= 1 << (shift - 1);
+        match self.top {
+            None => {
+                // First packet ever — always fresh.
+                self.top = Some(n);
+                true
             }
-            self.top = n;
-            true
-        } else {
-            let behind = self.top - n;
-            if behind == 0 || behind > WIDTH {
-                return false; // top already seen, or too old
+            Some(top) if n > top => {
+                let shift = n - top;
+                if shift >= WIDTH {
+                    self.mask = 0;
+                } else {
+                    self.mask <<= shift;
+                    self.mask |= 1 << (shift - 1);
+                }
+                self.top = Some(n);
+                true
             }
-            let bit = 1u128 << (behind - 1);
-            if self.mask & bit != 0 {
-                return false; // replay
+            Some(top) => {
+                let behind = top - n;
+                if behind == 0 {
+                    return false; // exact duplicate of top nonce
+                }
+                if behind > WIDTH {
+                    return false; // too old, outside replay window
+                }
+                let bit = 1u128 << (behind - 1);
+                if self.mask & bit != 0 {
+                    return false; // replay
+                }
+                self.mask |= bit;
+                true
             }
-            self.mask |= bit;
-            true
         }
     }
 }
