@@ -15,8 +15,6 @@
 //!    │                    → Transport ←         │
 //! ```
 
-use std::collections::HashSet;
-
 use crate::device::DeviceKeys;
 use seednet_common::{Error, NetworkSecret};
 
@@ -28,17 +26,59 @@ pub const TRANSPORT_OVERHEAD: usize = 8 + 16;
 /// Nonce size prepended to every encrypted UDP datagram.
 const NONCE_LEN: usize = 8;
 
+/// Sliding-window replay filter replacing `HashSet<u64>`.
+///
+/// Tracks the highest seen nonce and a 128-bit bitmap of the preceding 128
+/// nonces.  This is O(1) CPU and fixed 16-byte memory instead of growing
+/// hash-set memory.  Out-of-window packets (more than 128 behind the top)
+/// are treated as replays and rejected — acceptable for UDP where a packet
+/// that old is effectively lost anyway.
+#[derive(Debug, Default)]
+struct NonceWindow {
+    top: u64,
+    mask: u128, // bit i set ⇒ nonce (top - 1 - i) was seen
+}
+
+impl NonceWindow {
+    /// Returns `true` and records the nonce if it is fresh; `false` if replay.
+    fn check_and_insert(&mut self, n: u64) -> bool {
+        const WIDTH: u64 = 128;
+        if n > self.top {
+            let shift = n - self.top;
+            if shift >= WIDTH {
+                self.mask = 0;
+            } else {
+                self.mask <<= shift;
+                self.mask |= 1 << (shift - 1);
+            }
+            self.top = n;
+            true
+        } else {
+            let behind = self.top - n;
+            if behind == 0 || behind > WIDTH {
+                return false; // top already seen, or too old
+            }
+            let bit = 1u128 << (behind - 1);
+            if self.mask & bit != 0 {
+                return false; // replay
+            }
+            self.mask |= bit;
+            true
+        }
+    }
+}
+
 /// Encrypted transport using `StatelessTransportState` (per-packet nonce).
 ///
 /// Each datagram carries its 8-byte LE nonce as a prefix, so dropped or
 /// reordered UDP packets never desynchronize the counter.  Received nonces
-/// are tracked in `seen_nonces` to reject replays.
+/// are tracked in a sliding-window bitmap to reject replays.
 #[derive(Debug)]
 pub struct SecureTransport {
     state: snow::StatelessTransportState,
     remote_static: [u8; 32],
     send_nonce: u64,
-    seen_nonces: HashSet<u64>,
+    nonce_window: NonceWindow,
 }
 
 pub struct HandshakeResult {
@@ -85,7 +125,7 @@ fn into_transport(state: snow::HandshakeState) -> std::result::Result<SecureTran
         state: ts,
         remote_static: rs,
         send_nonce: 0,
-        seen_nonces: HashSet::new(),
+        nonce_window: NonceWindow::default(),
     })
 }
 
@@ -208,15 +248,34 @@ impl SecureTransport {
         Ok(out)
     }
 
+    /// Zero-allocation encrypt: writes directly into `out` (must be pre-sized to
+    /// `NONCE_LEN + plaintext.len() + 16`).  Returns the number of bytes written.
+    pub fn encrypt_into(
+        &mut self,
+        plaintext: &[u8],
+        out: &mut [u8],
+    ) -> std::result::Result<usize, Error> {
+        debug_assert!(out.len() >= NONCE_LEN + plaintext.len() + 16);
+        let nonce = self.send_nonce;
+        self.send_nonce = self.send_nonce.wrapping_add(1);
+
+        out[..NONCE_LEN].copy_from_slice(&nonce.to_le_bytes());
+        let n = self
+            .state
+            .write_message(nonce, plaintext, &mut out[NONCE_LEN..])
+            .map_err(|e| Error::NoiseTransport(format!("encrypt_into: {e}")))?;
+        Ok(NONCE_LEN + n)
+    }
+
     /// Decrypt a datagram produced by `encrypt`.
     pub fn decrypt(&mut self, datagram: &[u8]) -> std::result::Result<Vec<u8>, Error> {
         if datagram.len() < NONCE_LEN + 16 {
             return Err(Error::NoiseTransport("datagram too short".into()));
         }
         let nonce = u64::from_le_bytes(datagram[..NONCE_LEN].try_into().unwrap());
-        if !self.seen_nonces.insert(nonce) {
+        if !self.nonce_window.check_and_insert(nonce) {
             return Err(Error::NoiseTransport(format!(
-                "replay detected: nonce {nonce} already used"
+                "replay detected: nonce {nonce}"
             )));
         }
         let ciphertext = &datagram[NONCE_LEN..];
@@ -227,6 +286,31 @@ impl SecureTransport {
             .map_err(|e| Error::NoiseTransport(format!("decrypt: {e}")))?;
         buf.truncate(n);
         Ok(buf)
+    }
+
+    /// Zero-allocation decrypt: writes plaintext into `out` (must be ≥ `datagram.len()`).
+    /// Returns the number of plaintext bytes written.
+    pub fn decrypt_into(
+        &mut self,
+        datagram: &[u8],
+        out: &mut [u8],
+    ) -> std::result::Result<usize, Error> {
+        if datagram.len() < NONCE_LEN + 16 {
+            return Err(Error::NoiseTransport("datagram too short".into()));
+        }
+        let nonce = u64::from_le_bytes(datagram[..NONCE_LEN].try_into().unwrap());
+        if !self.nonce_window.check_and_insert(nonce) {
+            return Err(Error::NoiseTransport(format!(
+                "replay detected: nonce {nonce}"
+            )));
+        }
+        let ciphertext = &datagram[NONCE_LEN..];
+        debug_assert!(out.len() >= ciphertext.len());
+        let n = self
+            .state
+            .read_message(nonce, ciphertext, out)
+            .map_err(|e| Error::NoiseTransport(format!("decrypt_into: {e}")))?;
+        Ok(n)
     }
 
     pub fn remote_static_key(&self) -> &[u8; 32] {

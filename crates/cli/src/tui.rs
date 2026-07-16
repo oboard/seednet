@@ -978,7 +978,7 @@ fn chrono_time() -> String {
         let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as libc::time_t;
+            .as_secs() as i64;
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         unsafe { libc::localtime_r(&secs, &mut tm) };
         format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)

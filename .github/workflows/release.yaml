@@ -67,8 +67,20 @@ jobs:
           sudo apt-get install -y musl-tools
           if [ "${{ matrix.target }}" = "aarch64-unknown-linux-musl" ]; then
             sudo apt-get install -y gcc-aarch64-linux-gnu
-            echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
           fi
+
+      - name: Install cargo-zigbuild (musl targets)
+        if: endsWith(matrix.target, '-linux-musl')
+        uses: cargo-bins/cargo-binstall@main
+        with:
+          crate: cargo-zigbuild
+          version: latest
+
+      - name: Install zig (musl targets)
+        if: endsWith(matrix.target, '-linux-musl')
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: 0.13.0
 
       - name: Configure aarch64-linux-gnu linker
         if: matrix.target == 'aarch64-unknown-linux-gnu'
@@ -78,7 +90,12 @@ jobs:
         with:
           key: release-${{ matrix.target }}
 
+      - name: Build binary (musl)
+        if: endsWith(matrix.target, '-linux-musl')
+        run: cargo zigbuild --release -p seednet-cli --target ${{ matrix.target }}
+
       - name: Build binary
+        if: "!endsWith(matrix.target, '-linux-musl')"
         run: cargo build --release -p seednet-cli --target ${{ matrix.target }}
 
       - name: Rename binary
