@@ -38,7 +38,8 @@ use tokio::runtime::Runtime;
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 fn rt() -> Runtime {
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
         .unwrap()
