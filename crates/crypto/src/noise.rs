@@ -45,7 +45,7 @@ impl NonceWindow {
     /// Returns `true` and records the nonce if it is fresh; `false` if replay.
     fn check_and_insert(&mut self, n: u64) -> bool {
         if !self.initialized {
-            self.top = n;
+            self.top = Some(n);
             self.initialized = true;
             return true;
         }

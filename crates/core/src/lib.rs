@@ -1029,7 +1029,8 @@ impl SeedNetEngine {
                                                             relay_paths_in.insert(*pid, rid);
                                                             let overlay = derive_overlay_addr(pid);
                                                             {
-                                                                let mut rt = routing_table_in.write().await;
+                                                                let mut rt =
+                                                                    routing_table_in.write().await;
                                                                 rt.add_route(overlay, *pid);
                                                             }
 
@@ -1117,9 +1118,11 @@ impl SeedNetEngine {
                                                         relay_paths_in.insert(dst_peer_id, rid);
                                                         // Ensure the routing table has an entry for the
                                                         // requesting peer so TUN packets can be forwarded.
-                                                        let overlay = derive_overlay_addr(&dst_peer_id);
+                                                        let overlay =
+                                                            derive_overlay_addr(&dst_peer_id);
                                                         {
-                                                            let mut rt = routing_table_in.write().await;
+                                                            let mut rt =
+                                                                routing_table_in.write().await;
                                                             rt.add_route(overlay, dst_peer_id);
                                                         }
                                                         tracing::info!(

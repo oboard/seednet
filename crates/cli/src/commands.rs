@@ -411,7 +411,9 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
         } else {
             format!("{short} ({hostname})")
         };
-        let conn_display = if connection == "relay" && !relay_via.is_empty() {
+        let conn_display = if latency.is_empty() {
+            "connecting".to_string()
+        } else if connection == "relay" && !relay_via.is_empty() {
             format!("relay/{relay_via}")
         } else {
             connection.to_string()
@@ -426,8 +428,20 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
             display_id, overlay, ipv6, conn_display, latency_display, under
         );
     }
+    let connected_count = peers
+        .iter()
+        .filter(|p| !p["latency_ms"].as_str().unwrap_or("").is_empty())
+        .count();
     println!();
-    println!("{} peer(s) connected.", peers.len());
+    println!(
+        "{} peer(s) connected{}.",
+        connected_count,
+        if peers.len() > connected_count {
+            format!(", {} connecting", peers.len() - connected_count)
+        } else {
+            String::new()
+        }
+    );
 
     Ok(())
 }
