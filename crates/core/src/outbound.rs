@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::sync::Arc;
 
-use seednet_common::{OVERLAY_MTU, OverlayAddr};
+use seednet_common::{OVERLAY_MTU, OverlayAddr, PeerId};
 use seednet_peer::Message;
 use seednet_routing::RoutingTable;
 use seednet_transport::{MultiTransport, Transport};
@@ -15,6 +15,7 @@ pub(crate) struct OutboundArgs {
     pub sessions: Sessions,
     pub transport: Arc<MultiTransport>,
     pub our_overlay: OverlayAddr,
+    pub our_peer_id: PeerId,
     pub tun_writer: Arc<Mutex<TunWriter>>,
     pub relay_candidates: RelayCandidates,
     pub relay_paths: RelayPaths,
@@ -69,18 +70,20 @@ pub(crate) async fn run_outbound_loop(args: OutboundArgs, mut tun_reader: seedne
                                 &Message::Data(Cow::Owned(packet.to_vec())),
                                 &mut ser_buf,
                             );
-                            if let Ok(inner_enc) = relay_session.transport.encrypt(&ser_buf) {
-                                let relay_pkt =
-                                    seednet_peer::message::serialize_message(&Message::RelayData {
-                                        dst_peer_id: peer_id,
-                                        payload: Cow::Owned(inner_enc),
-                                    });
-                                if let Ok(outer_enc) = relay_session.transport.encrypt(&relay_pkt) {
-                                    let addr = relay_session.underlay.clone();
-                                    drop(relay_session);
-                                    let _ = args.transport.send_to(&outer_enc, addr).await;
-                                }
+                            let relay_pkt =
+                                seednet_peer::message::serialize_message(&Message::RelayData {
+                                    src_peer_id: args.our_peer_id,
+                                    dst_peer_id: peer_id,
+                                    payload: Cow::Owned(ser_buf.clone()),
+                                });
+                            if let Ok(outer_enc) = relay_session.transport.encrypt(&relay_pkt) {
+                                let addr = relay_session.underlay.clone();
+                                drop(relay_session);
+                                tracing::info!(target: "seednet", dst = %peer_id.short(), relay = %relay_id.short(), to = %addr, "sending relay packet");
+                                let _ = args.transport.send_to(&outer_enc, addr).await;
                             }
+                        } else {
+                            tracing::info!(target: "seednet", dst = %peer_id.short(), relay = %relay_id.short(), "relay path exists but relay has no session");
                         }
                     } else {
                         tracing::debug!(target: "seednet", peer = %peer_id.short(), "no session or relay for peer");

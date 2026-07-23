@@ -338,13 +338,32 @@ pub(crate) async fn run_inbound_loop(args: InboundArgs) {
                                             let mut rt = args.routing_table.write().await;
                                             rt.add_route(overlay, dst_peer_id);
                                         }
+                                        // Register in peer manager so it shows up in peers.json.
+                                        let fake_addr: std::net::SocketAddr =
+                                            "0.0.0.0:0".parse().unwrap();
+                                        let _ =
+                                            args.peer_mgr.discover(dst_peer_id, fake_addr).await;
+                                        let _ = args
+                                            .peer_mgr
+                                            .transition_peer(&dst_peer_id, PeerState::Connecting)
+                                            .await;
+                                        let _ = args
+                                            .peer_mgr
+                                            .transition_peer(&dst_peer_id, PeerState::Handshaking)
+                                            .await;
+                                        let _ = args
+                                            .peer_mgr
+                                            .transition_peer(&dst_peer_id, PeerState::Connected)
+                                            .await;
                                         tracing::info!(target: "seednet", dst = %dst_peer_id.short(), relay = %relay_peer_id.short(), overlay = %overlay, "relay path established, route added");
                                     }
                                     Ok(Message::RelayData {
+                                        src_peer_id,
                                         dst_peer_id,
                                         payload,
                                     }) => {
-                                        handle_relay_data(&args, &from, dst_peer_id, payload).await;
+                                        handle_relay_data(&args, src_peer_id, dst_peer_id, payload)
+                                            .await;
                                     }
                                     Ok(msg) => {
                                         tracing::debug!(target: "seednet", from = %from, ?msg, "unhandled message type");
@@ -430,6 +449,11 @@ async fn handle_session_init(
         }
         args.addr_index.insert(from.clone(), peer_id);
 
+        // Migrate relay_paths: any path recorded under old_id moves to peer_id.
+        if let Some((_, relay_id)) = args.relay_paths.remove(&old_id) {
+            args.relay_paths.insert(peer_id, relay_id);
+        }
+
         let stale = derive_overlay_addr(&old_id);
         {
             let mut rt = args.routing_table.write().await;
@@ -453,6 +477,32 @@ async fn handle_session_init(
                 .transition_peer(&peer_id, PeerState::Connected)
                 .await;
             let _ = new_peer;
+        }
+
+        // Re-broadcast the correct peer_id to all existing peers (the initial PeerDirectory
+        // broadcast used the Noise-derived id which may differ from SessionInit's peer_id).
+        if args.can_relay
+            && let TransportAddr::Udp(new_peer_addr) = *from
+        {
+            let new_entry = vec![(peer_id, new_peer_addr)];
+            let dir = seednet_peer::message::serialize_message(&Message::PeerDirectory {
+                entries: new_entry,
+            });
+            let existing_ids: Vec<PeerId> = args
+                .sessions
+                .iter()
+                .filter(|e| *e.key() != peer_id)
+                .map(|e| *e.key())
+                .collect();
+            for existing_id in existing_ids {
+                if let Some(mut s) = args.sessions.get_mut(&existing_id)
+                    && let Ok(enc) = s.transport.encrypt(&dir)
+                {
+                    let addr = s.underlay.clone();
+                    drop(s);
+                    let _ = args.transport.send_to(&enc, addr).await;
+                }
+            }
         }
     } else {
         let mut rt = args.routing_table.write().await;
@@ -525,16 +575,13 @@ async fn handle_relay_request(args: &InboundArgs, from: &TransportAddr, dst_peer
     if args.can_relay {
         let requesting_id = args.addr_index.get(from).map(|r| *r);
         if let Some(req_id) = requesting_id {
-            if let Some(mut dst_session) = args.sessions.get_mut(&dst_peer_id) {
-                let fwd = seednet_peer::message::serialize_message(&Message::RelayRequest {
-                    dst_peer_id: req_id,
-                });
-                if let Ok(enc) = dst_session.transport.encrypt(&fwd) {
-                    let addr = dst_session.underlay.clone();
-                    drop(dst_session);
-                    let _ = args.transport.send_to(&enc, addr).await;
-                }
+            let dst_has_session = args.sessions.contains_key(&dst_peer_id);
+            if !dst_has_session {
+                tracing::debug!(target: "seednet", dst = %dst_peer_id.short(), "relay request: dst has no session, ignoring");
+                return;
             }
+
+            // Tell the requesting peer: relay is ready.
             if let Some(mut req_session) = args.sessions.get_mut(&req_id) {
                 let ready = seednet_peer::message::serialize_message(&Message::RelayReady {
                     relay_peer_id: args.our_peer_id,
@@ -544,10 +591,27 @@ async fn handle_relay_request(args: &InboundArgs, from: &TransportAddr, dst_peer
                     let addr = req_session.underlay.clone();
                     drop(req_session);
                     let _ = args.transport.send_to(&enc, addr).await;
+                    tracing::info!(target: "seednet", req = %req_id.short(), dst = %dst_peer_id.short(), "relay ready sent to requester");
+                }
+            }
+
+            // Tell the destination peer: relay is ready (so it knows to expect relayed data).
+            if let Some(mut dst_session) = args.sessions.get_mut(&dst_peer_id) {
+                let ready = seednet_peer::message::serialize_message(&Message::RelayReady {
+                    relay_peer_id: args.our_peer_id,
+                    dst_peer_id: req_id,
+                });
+                if let Ok(enc) = dst_session.transport.encrypt(&ready) {
+                    let addr = dst_session.underlay.clone();
+                    drop(dst_session);
+                    let _ = args.transport.send_to(&enc, addr).await;
+                    tracing::info!(target: "seednet", dst = %dst_peer_id.short(), req = %req_id.short(), "relay ready sent to destination");
                 }
             }
         }
     } else {
+        // Non-relay node received a RelayRequest forwarded by relay.
+        // Record the relay path so we can send data back via relay.
         let relay_id = args.addr_index.get(from).map(|r| *r);
         if let Some(rid) = relay_id {
             args.relay_paths.insert(dst_peer_id, rid);
@@ -569,45 +633,34 @@ async fn handle_relay_request(args: &InboundArgs, from: &TransportAddr, dst_peer
 
 async fn handle_relay_data(
     args: &InboundArgs,
-    from: &TransportAddr,
+    src_peer_id: PeerId,
     dst_peer_id: PeerId,
     payload: Cow<'_, [u8]>,
 ) {
     if dst_peer_id == args.our_peer_id {
-        let sender_id = args.addr_index.get(from).map(|r| *r);
-        if let Some(sid) = sender_id
-            && let Some(mut session) = args.sessions.get_mut(&sid)
-            && let Ok(plain) = session.transport.decrypt(&payload)
-        {
-            drop(session);
-            if let Ok(Message::Data(ip_pkt)) = seednet_peer::message::deserialize_message(&plain) {
-                let mut w = args.tun_writer.lock().await;
-                let _ = w.send(&ip_pkt).await;
-                tracing::debug!(target: "seednet", bytes = ip_pkt.len(), "relayed packet written to TUN");
-            }
+        // We are the destination. The relay decrypted the sender's payload and re-wrapped it in a
+        // RelayData envelope encrypted with relay→us session key. The outer layer was already
+        // decrypted by run_inbound_loop, so `payload` here is the raw serialized Message from sender.
+        if let Ok(Message::Data(ip_pkt)) = seednet_peer::message::deserialize_message(&payload) {
+            let mut w = args.tun_writer.lock().await;
+            let _ = w.send(&ip_pkt).await;
+            tracing::debug!(target: "seednet", src = %src_peer_id.short(), bytes = ip_pkt.len(), "relayed packet written to TUN");
         }
     } else if args.can_relay {
-        let sender_id = args.addr_index.get(from).map(|r| *r);
-        let inner = if let Some(sid) = sender_id {
-            args.sessions
-                .get_mut(&sid)
-                .and_then(|mut s| s.transport.decrypt(&payload).ok())
-        } else {
-            None
-        };
-        if let Some(decrypted) = inner
-            && let Some(mut dst_session) = args.sessions.get_mut(&dst_peer_id)
-            && let Ok(re_enc) = dst_session.transport.encrypt(&decrypted)
-        {
+        // We are the relay. payload is the raw serialized Data message (sender did not
+        // double-encrypt it). The outer RelayData envelope was already decrypted by
+        // run_inbound_loop. Just forward payload to dst wrapped in a new envelope.
+        if let Some(mut dst_session) = args.sessions.get_mut(&dst_peer_id) {
             let fwd = seednet_peer::message::serialize_message(&Message::RelayData {
+                src_peer_id,
                 dst_peer_id,
-                payload: Cow::Owned(re_enc),
+                payload: Cow::Owned(payload.into_owned()),
             });
             if let Ok(outer) = dst_session.transport.encrypt(&fwd) {
                 let addr = dst_session.underlay.clone();
                 drop(dst_session);
                 let _ = args.transport.send_to(&outer, addr).await;
-                tracing::debug!(target: "seednet", dst = %dst_peer_id.short(), "relayed packet forwarded (re-encrypted)");
+                tracing::debug!(target: "seednet", src = %src_peer_id.short(), dst = %dst_peer_id.short(), "relayed packet forwarded");
             }
         }
     }

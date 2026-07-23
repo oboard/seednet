@@ -281,6 +281,7 @@ impl SeedNetEngine {
                 sessions: sessions.clone(),
                 transport: transport.clone(),
                 our_overlay: self.our_overlay,
+                our_peer_id: self.our_peer_id,
                 tun_writer: tun_writer.clone(),
                 relay_candidates: relay_candidates.clone(),
                 relay_paths: relay_paths.clone(),

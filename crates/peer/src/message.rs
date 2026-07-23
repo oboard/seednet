@@ -53,8 +53,10 @@ pub enum Message {
         dst_peer_id: PeerId,
     },
     /// Encapsulated data for relay forwarding.
-    /// `payload` is already Noise-encrypted — relay never decrypts it.
+    /// `payload` is Noise-encrypted with the sender→dst session key.
+    /// The relay forwards it opaquely; the destination decrypts with the sender's session.
     RelayData {
+        src_peer_id: PeerId,
         dst_peer_id: PeerId,
         #[serde(with = "serde_cow_bytes")]
         payload: Cow<'static, [u8]>,
