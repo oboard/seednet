@@ -150,7 +150,8 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
                 {
                     let _ = a.udp.send_to(&enc, TransportAddr::Udp(addr)).await;
                 }
-                let entries: Vec<(PeerId, SocketAddr)> = a
+                // Tell the new peer about all existing peers.
+                let existing_peers: Vec<(PeerId, SocketAddr)> = a
                     .sessions
                     .iter()
                     .filter(|e| *e.key() != peer_id)
@@ -162,14 +163,42 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
                         }
                     })
                     .collect();
-                if !entries.is_empty() {
+                if !existing_peers.is_empty() {
                     let dir = seednet_peer::message::serialize_message(&Message::PeerDirectory {
-                        entries,
+                        entries: existing_peers,
                     });
                     if let Some(mut session) = a.sessions.get_mut(&peer_id)
                         && let Ok(enc) = session.transport.encrypt(&dir)
                     {
                         let _ = a.udp.send_to(&enc, TransportAddr::Udp(addr)).await;
+                    }
+                }
+                // Tell all existing peers about the new peer.
+                {
+                    let new_entry = vec![(peer_id, addr)];
+                    let dir = seednet_peer::message::serialize_message(&Message::PeerDirectory {
+                        entries: new_entry,
+                    });
+                    let existing_ids: Vec<PeerId> = a
+                        .sessions
+                        .iter()
+                        .filter(|e| *e.key() != peer_id)
+                        .map(|e| *e.key())
+                        .collect();
+                    for existing_id in existing_ids {
+                        if let Some(mut s) = a.sessions.get_mut(&existing_id)
+                            && let Ok(enc) = s.transport.encrypt(&dir)
+                        {
+                            let uaddr = s.underlay.clone();
+                            drop(s);
+                            let _ = a.udp.send_to(&enc, uaddr).await;
+                            tracing::info!(
+                                target: "seednet",
+                                new_peer = %peer_id.short(),
+                                notified = %existing_id.short(),
+                                "notified existing peer about new peer (initiator)"
+                            );
+                        }
                     }
                 }
             }

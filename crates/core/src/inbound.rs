@@ -160,7 +160,8 @@ pub(crate) async fn run_inbound_loop(args: InboundArgs) {
                                     let _ = args.transport.send_to(&enc, from.clone()).await;
                                 }
 
-                                let entries: Vec<(PeerId, SocketAddr)> = args
+                                // Tell the new peer about all existing peers.
+                                let existing_peers: Vec<(PeerId, SocketAddr)> = args
                                     .sessions
                                     .iter()
                                     .filter(|e| *e.key() != peer_id)
@@ -172,14 +173,45 @@ pub(crate) async fn run_inbound_loop(args: InboundArgs) {
                                         }
                                     })
                                     .collect();
-                                if !entries.is_empty() {
+                                if !existing_peers.is_empty() {
                                     let dir = seednet_peer::message::serialize_message(
-                                        &Message::PeerDirectory { entries },
+                                        &Message::PeerDirectory {
+                                            entries: existing_peers,
+                                        },
                                     );
                                     if let Some(mut session) = args.sessions.get_mut(&peer_id)
                                         && let Ok(enc) = session.transport.encrypt(&dir)
                                     {
                                         let _ = args.transport.send_to(&enc, from.clone()).await;
+                                    }
+                                }
+
+                                // Tell all existing peers about the new peer.
+                                if let TransportAddr::Udp(new_peer_addr) = from {
+                                    let new_entry = vec![(peer_id, new_peer_addr)];
+                                    let dir = seednet_peer::message::serialize_message(
+                                        &Message::PeerDirectory { entries: new_entry },
+                                    );
+                                    let existing_ids: Vec<PeerId> = args
+                                        .sessions
+                                        .iter()
+                                        .filter(|e| *e.key() != peer_id)
+                                        .map(|e| *e.key())
+                                        .collect();
+                                    for existing_id in existing_ids {
+                                        if let Some(mut s) = args.sessions.get_mut(&existing_id)
+                                            && let Ok(enc) = s.transport.encrypt(&dir)
+                                        {
+                                            let addr = s.underlay.clone();
+                                            drop(s);
+                                            let _ = args.transport.send_to(&enc, addr).await;
+                                            tracing::info!(
+                                                target: "seednet",
+                                                new_peer = %peer_id.short(),
+                                                notified = %existing_id.short(),
+                                                "notified existing peer about new peer"
+                                            );
+                                        }
                                     }
                                 }
                             }

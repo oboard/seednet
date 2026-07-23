@@ -31,6 +31,7 @@ use net::{local_hostname, local_public_ip};
 
 const DHT_ANNOUNCE_INTERVAL: Duration = Duration::from_secs(300);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
+const PEER_DIRECTORY_BROADCAST_INTERVAL: Duration = Duration::from_secs(30);
 
 impl SeedNetEngine {
     pub async fn run(&self) -> std::result::Result<(), Error> {
@@ -383,6 +384,68 @@ impl SeedNetEngine {
             })
         };
 
+        // Periodic peer-directory broadcast (relay nodes only).
+        // Ensures every connected peer learns about all others regardless of join order.
+        let peer_dir_broadcast_handle = if can_relay {
+            let sessions_pdb = sessions.clone();
+            let stun_pdb = stun_public_addr.clone();
+            let udp_pdb = transport.clone();
+            let our_peer_id_pdb = self.our_peer_id;
+            Some(tokio::spawn(async move {
+                let mut interval = tokio::time::interval(PEER_DIRECTORY_BROADCAST_INTERVAL);
+                interval.tick().await; // skip first tick
+                loop {
+                    interval.tick().await;
+                    if stun_pdb.read().await.is_none() {
+                        continue;
+                    }
+                    let all_peers: Vec<(seednet_common::PeerId, SocketAddr)> = sessions_pdb
+                        .iter()
+                        .filter_map(|e| {
+                            if let seednet_transport::TransportAddr::Udp(a) = e.underlay {
+                                Some((*e.key(), a))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    if all_peers.len() < 2 {
+                        continue;
+                    }
+                    for entry in sessions_pdb.iter() {
+                        let recipient_id = *entry.key();
+                        let entries: Vec<(seednet_common::PeerId, SocketAddr)> = all_peers
+                            .iter()
+                            .filter(|(id, _)| *id != recipient_id)
+                            .copied()
+                            .collect();
+                        if entries.is_empty() {
+                            continue;
+                        }
+                        let dir =
+                            seednet_peer::message::serialize_message(&Message::PeerDirectory {
+                                entries,
+                            });
+                        if let Some(mut s) = sessions_pdb.get_mut(&recipient_id)
+                            && let Ok(enc) = s.transport.encrypt(&dir)
+                        {
+                            let addr = s.underlay.clone();
+                            drop(s);
+                            let _ = udp_pdb.send_to(&enc, addr).await;
+                        }
+                    }
+                    tracing::debug!(
+                        target: "seednet",
+                        peers = all_peers.len(),
+                        relay = %our_peer_id_pdb.short(),
+                        "broadcast peer directory to all connected peers"
+                    );
+                }
+            }))
+        } else {
+            None
+        };
+
         // Health-check (ping/RTT + path_kind update) task.
         const HEALTHCHECK_INTERVAL: Duration = Duration::from_secs(5);
         let healthcheck_handle = {
@@ -491,6 +554,9 @@ impl SeedNetEngine {
         discovery_handle.abort();
         announce_handle.abort();
         heartbeat_handle.abort();
+        if let Some(h) = peer_dir_broadcast_handle {
+            h.abort();
+        }
         healthcheck_handle.abort();
         stun_refresh_handle.abort();
         peers_file_handle.abort();
