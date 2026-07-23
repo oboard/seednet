@@ -437,7 +437,11 @@ impl SeedNetEngine {
                     )
                     .await
                     {
-                        *stun_addr_refresh.write().await = Some(addr);
+                        let mut w = stun_addr_refresh.write().await;
+                        if *w != Some(addr) {
+                            tracing::info!(target: "seednet", %addr, "public address changed");
+                            *w = Some(addr);
+                        }
                     }
                 }
             })

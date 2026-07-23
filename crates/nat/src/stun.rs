@@ -95,7 +95,7 @@ pub async fn query_public_addr_with_fallback(
     for &host in servers {
         match query_public_addr(socket, host).await {
             Ok(addr) => {
-                tracing::info!(target: "seednet", public_addr = %addr, stun_server = %host, "STUN discovery succeeded");
+                tracing::debug!(target: "seednet", public_addr = %addr, stun_server = %host, "STUN discovery succeeded");
                 return Ok(addr);
             }
             Err(e) => {

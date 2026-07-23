@@ -431,7 +431,7 @@ impl App {
         for line in stripped.lines() {
             let line = line.trim();
             if !line.is_empty() {
-                self.push_log(line);
+                self.push_log(strip_tracing_timestamp(line));
             }
         }
     }
@@ -769,15 +769,12 @@ impl App {
                                 Span::styled(&p.overlay_ipv6, Style::default().fg(Color::Green)),
                             ]));
                         }
-                        let conn_color = if p.connection == "relay" {
-                            Color::Yellow
+                        let (conn_label, conn_color) = if p.latency_ms.is_empty() {
+                            ("connecting".to_string(), Color::DarkGray)
+                        } else if p.connection == "relay" && !p.relay_via.is_empty() {
+                            (format!("relay via {}", p.relay_via), Color::Yellow)
                         } else {
-                            Color::DarkGray
-                        };
-                        let conn_label = if p.connection == "relay" && !p.relay_via.is_empty() {
-                            format!("relay via {}", p.relay_via)
-                        } else {
-                            p.connection.clone()
+                            (p.connection.clone(), Color::Green)
                         };
                         lines.push(Line::from(vec![
                             Span::styled("    conn     ", Style::default().fg(Color::DarkGray)),
@@ -981,7 +978,14 @@ fn chrono_time() -> String {
             .as_secs() as i64;
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
         unsafe { libc::localtime_r(&secs, &mut tm) };
-        format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
+        format!(
+            "{:02}-{:02} {:02}:{:02}:{:02}",
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
     }
     #[cfg(not(unix))]
     {
@@ -990,11 +994,62 @@ fn chrono_time() -> String {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
+        // Approximate: days since epoch, no DST/timezone
+        let day_of_year = (secs / 86400) % 365;
+        let month = (day_of_year / 30 + 1).min(12);
+        let day = day_of_year % 30 + 1;
         let h = (secs % 86400) / 3600;
         let m = (secs % 3600) / 60;
         let s = secs % 60;
-        format!("{h:02}:{m:02}:{s:02}")
+        format!("{month:02}-{day:02} {h:02}:{m:02}:{s:02}")
     }
+}
+
+/// Remove tracing's ISO timestamp prefix and trailing `key=value` fields from a log line.
+fn strip_tracing_timestamp(s: &str) -> String {
+    // Strip ISO timestamp: YYYY-MM-DDTHH:MM:SS.xxxxxxZ
+    let s = s.trim_start();
+    let s = if s.len() >= 20
+        && s.as_bytes()[4] == b'-'
+        && s.as_bytes()[7] == b'-'
+        && s.as_bytes()[10] == b'T'
+    {
+        if let Some(pos) = s.find('Z') {
+            s[pos + 1..].trim_start()
+        } else {
+            s
+        }
+    } else {
+        s
+    };
+
+    // Strip level prefix: "INFO ", "WARN ", "ERROR ", "DEBUG "
+    let s = s
+        .strip_prefix("INFO ")
+        .or_else(|| s.strip_prefix("WARN "))
+        .or_else(|| s.strip_prefix("ERROR "))
+        .or_else(|| s.strip_prefix("DEBUG "))
+        .unwrap_or(s)
+        .trim_start();
+
+    // Strip trailing key=value spans (tracing structured fields).
+    // Fields look like:  msg text  key=val key2=val2
+    // Strategy: find the first word that contains '=' and no leading quote → trim from there.
+    let mut end = s.len();
+    for (i, word) in s.split_ascii_whitespace().enumerate() {
+        if i > 0 && word.contains('=') && !word.starts_with('"') {
+            // Find byte offset of this word.
+            if let Some(pos) = s.find(word) {
+                // Make sure it's not inside a quoted span.
+                let before = &s[..pos];
+                if before.chars().filter(|&c| c == '"').count() % 2 == 0 {
+                    end = pos.saturating_sub(1);
+                    break;
+                }
+            }
+        }
+    }
+    s[..end].trim_end().to_string()
 }
 
 fn strip_ansi(s: &str) -> String {
