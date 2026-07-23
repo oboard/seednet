@@ -788,13 +788,12 @@ impl App {
                                 Span::styled(&p.overlay_ipv6, Style::default().fg(Color::Green)),
                             ]));
                         }
-                        let (conn_label, conn_color) = if p.latency_ms.is_empty() {
-                            ("connecting".to_string(), Color::DarkGray)
-                        } else if p.connection == "relay" && !p.relay_via.is_empty() {
-                            (format!("relay via {}", p.relay_via), Color::Yellow)
-                        } else {
-                            (p.connection.clone(), Color::Green)
-                        };
+                        let (conn_label, conn_color) =
+                            if p.connection == "relay" && !p.relay_via.is_empty() {
+                                (format!("relay via {}", p.relay_via), Color::Yellow)
+                            } else {
+                                (p.connection.clone(), Color::Green)
+                            };
                         lines.push(Line::from(vec![
                             Span::styled("    conn     ", Style::default().fg(Color::DarkGray)),
                             Span::styled(conn_label, Style::default().fg(conn_color)),
@@ -1016,9 +1015,8 @@ fn chrono_time() -> String {
     }
 }
 
-/// Remove tracing's ISO timestamp prefix and trailing `key=value` fields from a log line.
+/// Remove tracing's ISO timestamp prefix (e.g. `2026-07-23T02:51:14.755620Z  `) from a log line.
 fn strip_tracing_timestamp(s: &str) -> String {
-    // Strip ISO timestamp: YYYY-MM-DDTHH:MM:SS.xxxxxxZ
     let s = s.trim_start();
     let s = if s.len() >= 20
         && s.as_bytes()[4] == b'-'
@@ -1033,34 +1031,7 @@ fn strip_tracing_timestamp(s: &str) -> String {
     } else {
         s
     };
-
-    // Strip level prefix: "INFO ", "WARN ", "ERROR ", "DEBUG "
-    let s = s
-        .strip_prefix("INFO ")
-        .or_else(|| s.strip_prefix("WARN "))
-        .or_else(|| s.strip_prefix("ERROR "))
-        .or_else(|| s.strip_prefix("DEBUG "))
-        .unwrap_or(s)
-        .trim_start();
-
-    // Strip trailing key=value spans (tracing structured fields).
-    // Fields look like:  msg text  key=val key2=val2
-    // Strategy: find the first word that contains '=' and no leading quote → trim from there.
-    let mut end = s.len();
-    for (i, word) in s.split_ascii_whitespace().enumerate() {
-        if i > 0 && word.contains('=') && !word.starts_with('"') {
-            // Find byte offset of this word.
-            if let Some(pos) = s.find(word) {
-                // Make sure it's not inside a quoted span.
-                let before = &s[..pos];
-                if before.chars().filter(|&c| c == '"').count() % 2 == 0 {
-                    end = pos.saturating_sub(1);
-                    break;
-                }
-            }
-        }
-    }
-    s[..end].trim_end().to_string()
+    s.to_string()
 }
 
 fn strip_ansi(s: &str) -> String {
