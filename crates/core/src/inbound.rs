@@ -273,11 +273,13 @@ pub(crate) async fn run_inbound_loop(args: InboundArgs) {
                                             &args,
                                             &from,
                                             from_sa,
-                                            peer_id,
-                                            overlay,
-                                            overlay_ipv6,
-                                            hostname,
-                                            public_addr,
+                                            SessionInitPayload {
+                                                peer_id,
+                                                overlay,
+                                                overlay_ipv6,
+                                                hostname,
+                                                public_addr,
+                                            },
                                         )
                                         .await;
                                     }
@@ -366,16 +368,27 @@ pub(crate) async fn run_inbound_loop(args: InboundArgs) {
     }
 }
 
-async fn handle_session_init(
-    args: &InboundArgs,
-    from: &TransportAddr,
-    from_sa: SocketAddr,
+struct SessionInitPayload {
     peer_id: PeerId,
     overlay: OverlayAddr,
     overlay_ipv6: Option<[u8; 16]>,
     hostname: String,
     public_addr: Option<SocketAddr>,
+}
+
+async fn handle_session_init(
+    args: &InboundArgs,
+    from: &TransportAddr,
+    from_sa: SocketAddr,
+    init: SessionInitPayload,
 ) {
+    let SessionInitPayload {
+        peer_id,
+        overlay,
+        overlay_ipv6,
+        hostname,
+        public_addr,
+    } = init;
     let x25519_peer_id = args.addr_index.get(from).map(|r| *r);
     if let Some(old_id) = x25519_peer_id
         && old_id != peer_id
