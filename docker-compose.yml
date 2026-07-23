@@ -1,0 +1,19 @@
+services:
+  seednet:
+    image: seednet
+    build: .
+    container_name: seednet
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    volumes:
+      - ${HOME}/.seednet:/root/.seednet
+    command: ["-v", "_daemon", "oboard", "--state-dir", "/root/.seednet"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "2"
