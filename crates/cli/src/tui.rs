@@ -73,6 +73,7 @@ pub struct App {
     log_scroll: usize,
     log_col: usize,
     log_follow: bool,
+    log_visible_height: usize,
     state_dir: PathBuf,
     exe_path: PathBuf,
     last_poll: Instant,
@@ -93,6 +94,7 @@ impl App {
             log_scroll: 0,
             log_col: 0,
             log_follow: true,
+            log_visible_height: 20,
             state_dir,
             exe_path,
             last_poll: Instant::now() - POLL_INTERVAL,
@@ -106,11 +108,11 @@ impl App {
         let line = format!("{} {}", chrono_time(), msg.into());
         self.log_lines.push(line);
         if self.log_lines.len() > MAX_LOG_LINES {
-            self.log_lines.drain(..self.log_lines.len() - MAX_LOG_LINES);
+            let drop = self.log_lines.len() - MAX_LOG_LINES;
+            self.log_lines.drain(..drop);
+            self.log_scroll = self.log_scroll.saturating_sub(drop);
         }
-        if self.log_follow {
-            self.log_scroll = self.log_lines.len().saturating_sub(1);
-        }
+        // scroll position is updated in render_log when log_follow is true
     }
 
     fn toggle_daemon(&mut self) {
@@ -454,6 +456,9 @@ impl App {
             Focus::Log => {
                 self.log_follow = false;
                 self.log_scroll = self.log_scroll.saturating_sub(1);
+                self.log_scroll = self
+                    .log_scroll
+                    .min(self.log_lines.len().saturating_sub(self.log_visible_height));
             }
             Focus::Seed => {}
         }
@@ -474,11 +479,9 @@ impl App {
                 self.peers_list_state.select(Some(i));
             }
             Focus::Log => {
-                let max = self.log_lines.len().saturating_sub(1);
+                let max = self.log_lines.len().saturating_sub(self.log_visible_height);
                 self.log_scroll = (self.log_scroll + 1).min(max);
-                if self.log_scroll >= max {
-                    self.log_follow = true;
-                }
+                self.log_follow = self.log_scroll >= max;
             }
             Focus::Seed => {}
         }
@@ -563,7 +566,7 @@ impl App {
             KeyCode::PageDown => self.scroll_by(10),
             KeyCode::End => {
                 if matches!(self.focus, Focus::Log) {
-                    self.log_scroll = self.log_lines.len().saturating_sub(1);
+                    self.log_scroll = self.log_lines.len().saturating_sub(self.log_visible_height);
                     self.log_col = 0;
                     self.log_follow = true;
                 }
@@ -574,6 +577,22 @@ impl App {
                     self.log_col = 0;
                     self.log_follow = false;
                 }
+            }
+            // F — toggle follow mode
+            KeyCode::Char('f') if self.focus == Focus::Log => {
+                self.log_follow = !self.log_follow;
+                if self.log_follow {
+                    self.log_scroll = self.log_lines.len().saturating_sub(self.log_visible_height);
+                }
+            }
+            // C — clear log panel
+            KeyCode::Char('c')
+                if self.focus == Focus::Log && !mods.contains(KeyModifiers::CONTROL) =>
+            {
+                self.log_lines.clear();
+                self.log_scroll = 0;
+                self.log_col = 0;
+                self.log_follow = true;
             }
 
             _ => {}
@@ -824,48 +843,48 @@ impl App {
     fn render_log(&mut self, f: &mut Frame, area: Rect) {
         let focused = self.focus == Focus::Log;
         let total = self.log_lines.len();
+        let visible_height = area.height.saturating_sub(2) as usize;
+        self.log_visible_height = visible_height.max(1);
 
-        // Clamp scroll position.
-        if total == 0 {
-            self.log_scroll = 0;
-        } else {
-            self.log_scroll = self.log_scroll.min(total - 1);
+        // follow: pin top so the last line is always visible
+        if self.log_follow && total > 0 {
+            self.log_scroll = total.saturating_sub(visible_height);
         }
-        let scroll_row = self.log_scroll;
+
+        // clamp
+        let max_scroll = total.saturating_sub(visible_height);
+        self.log_scroll = self.log_scroll.min(max_scroll);
+
+        let top = self.log_scroll;
+        let bottom = (top + visible_height).min(total);
         let scroll_col = self.log_col;
 
-        let follow_marker = if self.log_follow { " [follow]" } else { "" };
+        let follow_marker = if self.log_follow { " follow" } else { "" };
         let col_marker = if scroll_col > 0 {
             format!(" →{scroll_col}")
         } else {
             String::new()
         };
-        let title = if focused {
-            format!(
-                " Log [{}/{}]{follow_marker}{col_marker} [↑↓←→ PgUp/Dn End] ",
-                scroll_row + 1,
-                total.max(1)
-            )
+        let range = if total == 0 {
+            "0/0".to_string()
         } else {
-            format!(
-                " Log [{}/{}]{follow_marker}{col_marker} ",
-                scroll_row + 1,
-                total.max(1)
-            )
+            format!("{}-{}/{}", top + 1, bottom, total)
         };
+        let hint = if focused {
+            " [↑↓ PgUp/Dn Home/End  F:follow  C:clear] "
+        } else {
+            ""
+        };
+        let title = format!(" Log {range}{follow_marker}{col_marker}{hint}");
 
-        // Inner width available for text (minus borders).
         let inner_w = area.width.saturating_sub(2) as usize;
 
-        // Build visible lines: start from scroll_row, take as many as fit.
-        let visible_height = area.height.saturating_sub(2) as usize;
         let lines: Vec<Line> = self
             .log_lines
             .iter()
-            .enumerate()
-            .skip(scroll_row)
+            .skip(top)
             .take(visible_height)
-            .map(|(idx, l)| {
+            .map(|l| {
                 let style = if l.contains("ERROR") || l.contains("error") {
                     Style::default().fg(Color::Red)
                 } else if l.contains("WARN") || l.contains("warn") {
@@ -878,17 +897,9 @@ impl App {
                     Style::default().fg(Color::White)
                 };
 
-                // Horizontal slice: skip scroll_col chars, then take inner_w.
                 let chars: Vec<char> = l.chars().collect();
                 let visible: String = chars.iter().skip(scroll_col).take(inner_w).collect();
-
-                // Highlight the currently selected (top-visible) line.
-                let bg = if idx == scroll_row && focused {
-                    style.bg(Color::DarkGray)
-                } else {
-                    style
-                };
-                Line::from(Span::styled(visible, bg))
+                Line::from(Span::styled(visible, style))
             })
             .collect();
 
