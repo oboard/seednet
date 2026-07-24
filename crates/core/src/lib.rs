@@ -81,6 +81,35 @@ impl SeedNetEngine {
                 let try_port = port.saturating_add(offset);
                 match UdpSocket::bind(format!("0.0.0.0:{try_port}")).await {
                     Ok(sock) => {
+                        // Increase UDP receive buffer to 16 MiB to handle burst traffic.
+                        // Uses SO_RCVBUFFORCE (root) to bypass system limit, falls back to SO_RCVBUF.
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::io::AsRawFd;
+                            let fd = sock.as_raw_fd();
+                            let rcvbuf: libc::c_int = 16 * 1024 * 1024;
+                            unsafe {
+                                // SO_RCVBUFFORCE = 33 on Linux (bypasses rmem_max limit, requires root).
+                                // Falls back to SO_RCVBUF if not privileged.
+                                const SO_RCVBUFFORCE: libc::c_int = 33;
+                                let r = libc::setsockopt(
+                                    fd,
+                                    libc::SOL_SOCKET,
+                                    SO_RCVBUFFORCE,
+                                    &rcvbuf as *const _ as *const libc::c_void,
+                                    std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                                );
+                                if r != 0 {
+                                    libc::setsockopt(
+                                        fd,
+                                        libc::SOL_SOCKET,
+                                        libc::SO_RCVBUF,
+                                        &rcvbuf as *const _ as *const libc::c_void,
+                                        std::mem::size_of::<libc::c_int>() as libc::socklen_t,
+                                    );
+                                }
+                            }
+                        }
                         if offset > 0 {
                             tracing::info!(
                                 target: "seednet",
@@ -368,15 +397,16 @@ impl SeedNetEngine {
             let our_peer_id_ps = self.our_peer_id;
             let stun_addr_ps = stun_public_addr.clone();
             tokio::spawn(async move {
-                // Wait until STUN is done (stun_addr becomes Some).
-                loop {
+                // Wait up to 5s for STUN, then broadcast regardless.
+                for _ in 0..10 {
                     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                     if stun_addr_ps.read().await.is_some() {
                         break;
                     }
                 }
-                if !relay_flag.load(std::sync::atomic::Ordering::Relaxed) {
-                    return; // not a relay, nothing to do
+                // Broadcast whenever we have 2+ sessions — STUN success is not required.
+                if sessions_ps.len() < 2 {
+                    return;
                 }
                 let all_peers: Vec<(seednet_common::PeerId, std::net::SocketAddr, u8)> = {
                     let mut v: Vec<(seednet_common::PeerId, std::net::SocketAddr, u8)> =

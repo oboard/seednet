@@ -584,7 +584,8 @@ async fn handle_peer_directory(
 }
 
 async fn handle_relay_request(args: &InboundArgs, from: &TransportAddr, dst_peer_id: PeerId) {
-    if args.can_relay_flag.load(Ordering::Relaxed) {
+    // Act as relay whenever we have direct sessions to both requester and dst.
+    if args.sessions.len() >= 2 {
         let requesting_id = args.addr_index.get(from).map(|r| *r);
         if let Some(req_id) = requesting_id {
             // Check if we can reach dst: direct session or via relay_paths.
@@ -701,7 +702,9 @@ async fn handle_relay_data(
         } else {
             tracing::info!(target: "seednet", src = %src_peer_id.short(), dst = %dst_peer_id.short(), "relayed payload deserialize failed");
         }
-    } else if args.can_relay_flag.load(Ordering::Relaxed) {
+    } else if args.sessions.contains_key(&dst_peer_id)
+        || args.relay_paths.contains_key(&dst_peer_id)
+    {
         if let Some(mut dst_session) = args.sessions.get_mut(&dst_peer_id) {
             // Direct session to dst: forward immediately.
             let fwd = seednet_peer::message::serialize_message(&Message::RelayData {
