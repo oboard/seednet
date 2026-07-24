@@ -20,7 +20,8 @@ pub(crate) const DISCOVERY_INTERVAL: Duration = Duration::from_secs(10);
 pub(crate) struct DiscoveryArgs {
     pub dht: DhtDiscovery,
     pub infohash: InfoHash,
-    pub tracker_addrs: Vec<SocketAddr>,
+    /// Direct peer addresses + those discovered from trackers (appended async).
+    pub tracker_addrs: Arc<tokio::sync::Mutex<Vec<SocketAddr>>>,
     pub transport: Arc<MultiTransport>,
     pub sessions: Sessions,
     pub addr_index: AddrIndex,
@@ -36,7 +37,7 @@ pub(crate) struct DiscoveryArgs {
     pub si_overlay_ipv6: std::net::Ipv6Addr,
     pub si_hostname: String,
     pub our_id: PeerId,
-    pub can_relay: bool,
+    pub can_relay_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) async fn run_discovery_loop(args: DiscoveryArgs) {
@@ -49,10 +50,11 @@ pub(crate) async fn run_discovery_loop(args: DiscoveryArgs) {
             interval.tick().await;
         }
 
+        let tracker_snapshot = args.tracker_addrs.lock().await.clone();
         let dht_peers = args.dht.lookup(&args.infohash).await.unwrap_or_default();
-        tracing::info!(target: "seednet", dht = dht_peers.len(), trackers = args.tracker_addrs.len(), "discovery cycle");
+        tracing::info!(target: "seednet", dht = dht_peers.len(), trackers = tracker_snapshot.len(), "discovery cycle");
 
-        let mut peers: Vec<SocketAddr> = args.tracker_addrs.clone();
+        let mut peers: Vec<SocketAddr> = tracker_snapshot;
         for p in dht_peers {
             if !peers.contains(&p) {
                 peers.push(p);
@@ -103,7 +105,7 @@ pub(crate) async fn run_discovery_loop(args: DiscoveryArgs) {
                 si_overlay_ipv6: args.si_overlay_ipv6,
                 si_hostname: args.si_hostname.clone(),
                 our_id: args.our_id,
-                can_relay: args.can_relay,
+                can_relay_flag: args.can_relay_flag.clone(),
             };
             tokio::spawn(do_initiator_handshake(ia));
         }

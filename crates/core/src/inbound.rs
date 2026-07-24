@@ -10,6 +10,8 @@ use seednet_routing::RoutingTable;
 use seednet_transport::{MultiTransport, Transport, TransportAddr};
 use tokio::sync::{Mutex, RwLock};
 
+use std::sync::atomic::Ordering;
+
 use crate::engine::{AddrIndex, PeerSession, RelayCandidates, RelayPaths, Sessions};
 use crate::handshake::{
     HANDSHAKE_TIMEOUT, NOISE_HANDSHAKE_INITIATOR_PREFIX, NOISE_HANDSHAKE_RESPONDER_PREFIX,
@@ -33,7 +35,8 @@ pub(crate) struct InboundArgs {
     pub relay_candidates: RelayCandidates,
     pub relay_paths: RelayPaths,
     pub our_peer_id: PeerId,
-    pub can_relay: bool,
+    /// Atomic flag updated by the background STUN task once public addr is confirmed.
+    pub can_relay_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) async fn run_inbound_loop(args: InboundArgs) {
@@ -143,7 +146,7 @@ pub(crate) async fn run_inbound_loop(args: InboundArgs) {
                                 let _ = args.transport.send_to(&enc, from.clone()).await;
                             }
 
-                            if args.can_relay
+                            if args.can_relay_flag.load(Ordering::Relaxed)
                                 && let Some(our_pub) = *args.stun_addr.read().await
                             {
                                 let announce = seednet_peer::message::serialize_message(
@@ -399,9 +402,12 @@ async fn handle_session_init(
         rt.add_route(overlay, peer_id);
     }
 
-    // PeerDirectory broadcast so peers discover each other through this relay.
-    if args.can_relay
-        && let TransportAddr::Udp(new_peer_addr) = *from
+    // PeerDirectory broadcast so peers discover each other.
+    // Broadcast whenever there are at least 2 sessions — regardless of STUN state.
+    // This handles the common case where the relay already has peers connected before
+    // STUN completes. can_relay_flag is used for RelayAnnounce (below) but not here.
+    if let TransportAddr::Udp(new_peer_addr) = *from
+        && args.sessions.len() >= 2
     {
         // Collect existing direct-session peers (hop_count=1).
         let mut existing_peers: Vec<(PeerId, SocketAddr, u8)> = args
@@ -545,8 +551,9 @@ async fn handle_peer_directory(
             }
         }
 
-        // Relay nodes re-broadcast received entries to other direct peers (OSPF-like propagation).
-        if args.can_relay {
+        // Re-broadcast received entries to other direct peers (OSPF-like propagation).
+        // Any node with multiple sessions can act as a relay for discovery purposes.
+        if args.sessions.len() >= 2 {
             let rebroadcast: Vec<(PeerId, SocketAddr, u8)> = entries
                 .iter()
                 .filter(|(pid, _, h)| *pid != args.our_peer_id && *h < MAX_HOP_REBROADCAST)
@@ -577,7 +584,7 @@ async fn handle_peer_directory(
 }
 
 async fn handle_relay_request(args: &InboundArgs, from: &TransportAddr, dst_peer_id: PeerId) {
-    if args.can_relay {
+    if args.can_relay_flag.load(Ordering::Relaxed) {
         let requesting_id = args.addr_index.get(from).map(|r| *r);
         if let Some(req_id) = requesting_id {
             // Check if we can reach dst: direct session or via relay_paths.
@@ -683,16 +690,18 @@ async fn handle_relay_data(
     payload: Cow<'_, [u8]>,
 ) {
     if dst_peer_id == args.our_peer_id
-        || (!args.sessions.contains_key(&dst_peer_id) && !args.can_relay)
+        || (!args.sessions.contains_key(&dst_peer_id) && !args.can_relay_flag.load(Ordering::Relaxed))
     {
         // We are the destination (either by exact match or because we can't forward and
         // the dst is not a known session — covers peer_id aliasing from SessionInit migration).
         if let Ok(Message::Data(ip_pkt)) = seednet_peer::message::deserialize_message(&payload) {
             let mut w = args.tun_writer.lock().await;
             let _ = w.send(&ip_pkt).await;
-            tracing::debug!(target: "seednet", src = %src_peer_id.short(), bytes = ip_pkt.len(), "relayed packet written to TUN");
+            tracing::info!(target: "seednet", src = %src_peer_id.short(), bytes = ip_pkt.len(), "relayed packet written to TUN");
+        } else {
+            tracing::info!(target: "seednet", src = %src_peer_id.short(), dst = %dst_peer_id.short(), "relayed payload deserialize failed");
         }
-    } else if args.can_relay {
+    } else if args.can_relay_flag.load(Ordering::Relaxed) {
         if let Some(mut dst_session) = args.sessions.get_mut(&dst_peer_id) {
             // Direct session to dst: forward immediately.
             let fwd = seednet_peer::message::serialize_message(&Message::RelayData {

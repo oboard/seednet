@@ -165,39 +165,54 @@ impl SeedNetEngine {
         }
         let transport = Arc::new(builder.build());
 
-        // STUN discovery.
-        let mut public_addr_init = seednet_nat::stun::query_public_addr_with_fallback(
-            transport.udp().unwrap().inner(),
-            STUN_SERVERS,
-        )
-        .await
-        .ok();
+        // STUN + DHT + tracker discovery all run in the background so the engine
+        // starts immediately without waiting for network round-trips.
+        // stun_public_addr starts None and is updated once STUN completes.
+        let stun_public_addr: Arc<RwLock<Option<SocketAddr>>> = Arc::new(RwLock::new(None));
+        // can_relay is set once STUN result is known; start as false.
+        let can_relay_flag: Arc<std::sync::atomic::AtomicBool> =
+            Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-        if public_addr_init.is_none()
-            && let Some(local_pub) = local_public_ip(bound_port)
+        // tracker_addrs starts with direct_peers and gets tracker results appended async.
+        let tracker_addrs: Arc<tokio::sync::Mutex<Vec<SocketAddr>>> =
+            Arc::new(tokio::sync::Mutex::new(self.config.direct_peers.clone()));
+
+        // Background STUN task — runs right after engine starts, before sessions are active.
+        // stun_public_addr and can_relay_flag are updated when done.
+        // Post-STUN PeerDirectory broadcast is deferred to after sessions are initialized.
         {
-            tracing::info!(
-                target: "seednet",
-                public_addr = %local_pub,
-                "STUN failed; using local interface public IP"
-            );
-            public_addr_init = Some(local_pub);
+            let stun_addr = stun_public_addr.clone();
+            let relay_flag = can_relay_flag.clone();
+            let transport_stun = transport.clone();
+            let port_for_stun = bound_port;
+            tokio::spawn(async move {
+                let mut addr = seednet_nat::stun::query_public_addr_with_fallback(
+                    transport_stun.udp().unwrap().inner(),
+                    STUN_SERVERS,
+                )
+                .await
+                .ok();
+                if addr.is_none() {
+                    addr = local_public_ip(port_for_stun);
+                }
+                if let Some(a) = addr {
+                    let cr = is_publicly_routable(a);
+                    tracing::info!(target: "seednet", public_addr = %a, can_relay = cr, "public address discovered");
+                    relay_flag.store(cr, std::sync::atomic::Ordering::Relaxed);
+                    *stun_addr.write().await = Some(a);
+                } else {
+                    tracing::warn!(target: "seednet", "STUN discovery failed; hole-punching and relay will be limited");
+                }
+            });
         }
 
-        let can_relay = public_addr_init.map(is_publicly_routable).unwrap_or(false);
-        if let Some(addr) = public_addr_init {
-            tracing::info!(target: "seednet", public_addr = %addr, can_relay, "public address discovered");
-        } else {
-            tracing::warn!(target: "seednet", "STUN discovery failed; hole-punching and relay will be limited");
-        }
-        let stun_public_addr: Arc<RwLock<Option<SocketAddr>>> =
-            Arc::new(RwLock::new(public_addr_init));
+        let can_relay = can_relay_flag.load(std::sync::atomic::Ordering::Relaxed);
+        let _ = can_relay; // used only for logging below
 
-        // DHT bootstrap + tracker queries.
+        // DHT background task — bootstraps, announces, then hands off to periodic re-announce.
         let dht = DhtDiscovery::start_with(0, std::net::Ipv4Addr::UNSPECIFIED, &[])
             .map_err(|e| Error::Dht(format!("DHT start failed: {e}")))?;
 
-        let mut tracker_addrs: Vec<SocketAddr> = self.config.direct_peers.clone();
         let infohash_bytes: [u8; 20] = {
             let b = self.infohash.as_bytes();
             let mut arr = [0u8; 20];
@@ -210,59 +225,61 @@ impl SeedNetEngine {
             id.copy_from_slice(&pk[..20]);
             id
         };
-        let announce_port = public_addr_init.map(|a| a.port()).unwrap_or(port);
 
-        let ((), tracker_results) = tokio::join!(
-            async {
-                tracing::info!(target: "seednet", "Waiting for DHT bootstrap …");
+        // Background DHT bootstrap + announce.
+        {
+            let dht_bg = dht.clone();
+            let infohash = self.infohash;
+            let stun_addr = stun_public_addr.clone();
+            tokio::spawn(async move {
+                tracing::info!(target: "seednet", "DHT bootstrap starting (background)…");
                 let bootstrapped =
-                    tokio::time::timeout(Duration::from_secs(15), dht.bootstrapped()).await;
+                    tokio::time::timeout(Duration::from_secs(15), dht_bg.bootstrapped()).await;
                 match bootstrapped {
                     Ok(true) => tracing::info!(target: "seednet", "DHT bootstrapped"),
-                    Ok(false) => {
-                        tracing::warn!(target: "seednet", "DHT bootstrap returned false")
-                    }
-                    Err(_) => tracing::warn!(
-                        target: "seednet",
-                        "DHT bootstrap timed out after 15s, continuing anyway"
-                    ),
+                    Ok(false) => tracing::warn!(target: "seednet", "DHT bootstrap returned false"),
+                    Err(_) => tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s"),
                 }
-                if let Err(e) = dht.announce(&self.infohash, announce_port).await {
+                let ap = stun_addr.read().await.map(|a| a.port()).unwrap_or(bound_port);
+                if let Err(e) = dht_bg.announce(&infohash, ap).await {
                     tracing::warn!(target: "seednet", error = %e, "DHT announce failed");
                 } else {
-                    tracing::info!(target: "seednet", port = announce_port, "Announced on DHT");
+                    tracing::info!(target: "seednet", port = ap, "Announced on DHT");
                 }
-            },
-            async {
-                if self.config.tracker_urls.is_empty() {
-                    return Vec::new();
-                }
+            });
+        }
+
+        // Background tracker queries — appends discovered peers to tracker_addrs.
+        if !self.config.tracker_urls.is_empty() {
+            let urls = self.config.tracker_urls.clone();
+            let addrs = tracker_addrs.clone();
+            let ih = infohash_bytes;
+            let pid = peer_id_bytes;
+            tokio::spawn(async move {
                 let mut futs = Vec::new();
-                for url in &self.config.tracker_urls {
-                    let url = url.clone();
-                    let ih = infohash_bytes;
-                    let pid = peer_id_bytes;
+                for url in urls {
+                    let ih2 = ih;
+                    let pid2 = pid;
                     futs.push(tokio::spawn(async move {
-                        seednet_tracker::announce(&url, &ih, &pid, port).await
+                        seednet_tracker::announce(&url, &ih2, &pid2, bound_port).await
                     }));
                 }
-                let mut all = Vec::new();
+                let mut discovered = Vec::new();
                 for fut in futs {
                     if let Ok(peers) = fut.await {
-                        all.extend(peers);
+                        discovered.extend(peers);
                     }
                 }
-                tracing::info!(target: "seednet", count = all.len(), "tracker peers collected");
-                all
-            }
-        );
-        for p in tracker_results {
-            if !tracker_addrs.contains(&p) {
-                tracker_addrs.push(p);
-            }
-        }
-        if !tracker_addrs.is_empty() {
-            tracing::info!(target: "seednet", total = tracker_addrs.len(), "tracker+direct peers ready");
+                if !discovered.is_empty() {
+                    let mut locked = addrs.lock().await;
+                    for p in discovered {
+                        if !locked.contains(&p) {
+                            locked.push(p);
+                        }
+                    }
+                    tracing::info!(target: "seednet", total = locked.len(), "tracker peers added to discovery");
+                }
+            });
         }
 
         let relay_candidates: RelayCandidates = Arc::new(DashMap::new());
@@ -307,7 +324,7 @@ impl SeedNetEngine {
                 relay_candidates: relay_candidates.clone(),
                 relay_paths: relay_paths.clone(),
                 our_peer_id: self.our_peer_id,
-                can_relay,
+                can_relay_flag: can_relay_flag.clone(),
             };
             tokio::spawn(inbound::run_inbound_loop(ia))
         };
@@ -334,10 +351,92 @@ impl SeedNetEngine {
                 si_overlay_ipv6: our_overlay_ipv6_si,
                 si_hostname: our_hostname_si.clone(),
                 our_id: self.our_peer_id,
-                can_relay,
+                can_relay_flag: can_relay_flag.clone(),
             };
             tokio::spawn(discovery::run_discovery_loop(da))
         };
+
+        // Post-STUN PeerDirectory broadcast: once STUN completes and this node is confirmed
+        // as a relay, broadcast PeerDirectory to all already-connected peers so they can
+        // discover each other (handles the race where peers connected before STUN finished).
+        {
+            let relay_flag = can_relay_flag.clone();
+            let sessions_ps = sessions.clone();
+            let relay_paths_ps = relay_paths.clone();
+            let peer_mgr_ps = self.peer_manager.clone();
+            let transport_ps = transport.clone();
+            let our_peer_id_ps = self.our_peer_id;
+            let stun_addr_ps = stun_public_addr.clone();
+            tokio::spawn(async move {
+                // Wait until STUN is done (stun_addr becomes Some).
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    if stun_addr_ps.read().await.is_some() {
+                        break;
+                    }
+                }
+                if !relay_flag.load(std::sync::atomic::Ordering::Relaxed) {
+                    return; // not a relay, nothing to do
+                }
+                let all_peers: Vec<(seednet_common::PeerId, std::net::SocketAddr, u8)> = {
+                    let mut v: Vec<(seednet_common::PeerId, std::net::SocketAddr, u8)> =
+                        sessions_ps
+                            .iter()
+                            .filter_map(|e| {
+                                if let seednet_transport::TransportAddr::Udp(sa) = e.underlay {
+                                    Some((*e.key(), sa, 1u8))
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
+                    for entry in relay_paths_ps.iter() {
+                        let rp_peer = *entry.key();
+                        if rp_peer != our_peer_id_ps && !v.iter().any(|(id, _, _)| *id == rp_peer)
+                        {
+                            if let Some(p) = peer_mgr_ps.get(&rp_peer) {
+                                if let Some(pub_addr) = p.public_addr().await {
+                                    v.push((rp_peer, pub_addr, entry.value().1));
+                                }
+                            }
+                        }
+                    }
+                    v
+                };
+                let peer_ids: Vec<seednet_common::PeerId> =
+                    sessions_ps.iter().map(|e| *e.key()).collect();
+                let mut notified = 0usize;
+                for recipient in &peer_ids {
+                    let entries: Vec<(seednet_common::PeerId, std::net::SocketAddr, u8)> =
+                        all_peers
+                            .iter()
+                            .filter(|(id, _, _)| id != recipient)
+                            .copied()
+                            .collect();
+                    if entries.is_empty() {
+                        continue;
+                    }
+                    let dir = seednet_peer::message::serialize_message(
+                        &seednet_peer::Message::PeerDirectory { entries },
+                    );
+                    if let Some(mut s) = sessions_ps.get_mut(recipient)
+                        && let Ok(enc) = s.transport.encrypt(&dir)
+                    {
+                        let uaddr = s.underlay.clone();
+                        drop(s);
+                        let _ = transport_ps.send_to(&enc, uaddr).await;
+                        notified += 1;
+                    }
+                }
+                if notified > 0 {
+                    tracing::info!(
+                        target: "seednet",
+                        peers = notified,
+                        "post-STUN PeerDirectory broadcast to existing peers"
+                    );
+                }
+            });
+        }
 
         // Periodic DHT re-announce task.
         let stun_addr_announce = stun_public_addr.clone();
@@ -383,16 +482,23 @@ impl SeedNetEngine {
 
         // Periodic peer-directory broadcast (relay nodes only).
         // Ensures every connected peer learns about all others regardless of join order.
-        let peer_dir_broadcast_handle = if can_relay {
+        let can_relay_for_pdb = can_relay_flag.clone();
+        let peer_dir_broadcast_handle = if can_relay_flag.load(std::sync::atomic::Ordering::Relaxed) || true {
+            // Always spawn the task; it will check can_relay dynamically on each tick.
             let sessions_pdb = sessions.clone();
             let stun_pdb = stun_public_addr.clone();
             let udp_pdb = transport.clone();
             let our_peer_id_pdb = self.our_peer_id;
+            let can_relay_pdb = can_relay_for_pdb.clone();
             Some(tokio::spawn(async move {
                 let mut interval = tokio::time::interval(PEER_DIRECTORY_BROADCAST_INTERVAL);
                 interval.tick().await; // skip first tick
                 loop {
                     interval.tick().await;
+                    // Only broadcast if this node is confirmed as a relay.
+                    if !can_relay_pdb.load(std::sync::atomic::Ordering::Relaxed) {
+                        continue;
+                    }
                     if stun_pdb.read().await.is_none() {
                         continue;
                     }
@@ -485,6 +591,7 @@ impl SeedNetEngine {
         // STUN refresh task.
         let stun_refresh_handle = {
             let stun_addr_refresh = stun_public_addr.clone();
+            let relay_flag_refresh = can_relay_flag.clone();
             let udp_stun = transport.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(DHT_ANNOUNCE_INTERVAL);
@@ -501,6 +608,8 @@ impl SeedNetEngine {
                         if *w != Some(addr) {
                             tracing::info!(target: "seednet", %addr, "public address changed");
                             *w = Some(addr);
+                            let cr = is_publicly_routable(addr);
+                            relay_flag_refresh.store(cr, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -512,7 +621,7 @@ impl SeedNetEngine {
         let local_overlay = self.our_overlay;
         let local_ipv6 = self.our_overlay_ipv6;
         let local_hostname_str = local_hostname();
-        let local_public_addr = public_addr_init;
+        let local_public_addr = *stun_public_addr.read().await;
         let local_json = format!(
             concat!(
                 r#"{{"id":"{id}","id_short":"{short}","#,

@@ -34,7 +34,7 @@ pub(crate) struct InitiatorArgs {
     pub si_overlay_ipv6: std::net::Ipv6Addr,
     pub si_hostname: String,
     pub our_id: PeerId,
-    pub can_relay: bool,
+    pub can_relay_flag: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
@@ -135,7 +135,7 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
                 let _ = a.udp.send_to(&enc, TransportAddr::Udp(addr)).await;
             }
             // Advertise relay + send peer directory if we are a relay.
-            if a.can_relay
+            if a.can_relay_flag.load(std::sync::atomic::Ordering::Relaxed)
                 && let Some(our_pub) = *a.stun_addr.read().await
             {
                 let announce = seednet_peer::message::serialize_message(&Message::RelayAnnounce {
