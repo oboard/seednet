@@ -103,10 +103,11 @@ async fn build_peer_entry(
             (String::new(), String::new(), String::new(), String::new())
         };
 
-    let (connection, relay_via) = if let Some(relay_id) = args.relay_paths.get(id) {
-        ("relay", relay_id.short().to_string())
+    let (connection, relay_via, relay_hops) = if let Some(entry) = args.relay_paths.get(id) {
+        let (relay_id, hops) = *entry;
+        ("relay", relay_id.short().to_string(), hops)
     } else {
-        ("direct", String::new())
+        ("direct", String::new(), 0u8)
     };
 
     let latency = if let Some(peer) = args.peer_mgr.get(id) {
@@ -123,7 +124,7 @@ async fn build_peer_entry(
             r#"{{"id":"{id}","id_short":"{short}","#,
             r#""overlay":"{overlay}","overlay_ipv6":"{ipv6}","#,
             r#""hostname":"{hostname}","public_addr":"{pub_addr}","#,
-            r#""connection":"{connection}","relay_via":"{relay_via}","#,
+            r#""connection":"{connection}","relay_via":"{relay_via}","relay_hops":{relay_hops},"#,
             r#""latency_ms":"{latency}","#,
             r#""underlay":"{underlay}"}}"#,
         ),
@@ -135,6 +136,7 @@ async fn build_peer_entry(
         pub_addr = public_addr_str,
         connection = connection,
         relay_via = relay_via,
+        relay_hops = relay_hops,
         latency = latency,
         underlay = underlay,
     )

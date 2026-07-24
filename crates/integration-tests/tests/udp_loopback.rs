@@ -166,7 +166,6 @@ async fn session_init_with_metadata_round_trips() {
         seednet_crypto::complete_handshake_pair(&secret, &keys_a, &secret, &keys_b).unwrap();
 
     let init_msg = Message::SessionInit {
-        peer_id: peer_id_a,
         overlay: overlay_a,
         overlay_ipv6: Some(ipv6_a.octets()),
         hostname: "my-server.local".to_string(),
@@ -179,13 +178,11 @@ async fn session_init_with_metadata_round_trips() {
 
     match recovered {
         Message::SessionInit {
-            peer_id,
             overlay,
             overlay_ipv6,
             hostname,
             ..
         } => {
-            assert_eq!(peer_id, peer_id_a);
             assert_eq!(overlay, overlay_a);
             assert_eq!(
                 overlay_ipv6,

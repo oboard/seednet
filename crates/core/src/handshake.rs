@@ -30,12 +30,10 @@ pub(crate) struct InitiatorArgs {
     pub routing_table: Arc<RwLock<RoutingTable>>,
     pub relay_cands: RelayCandidates,
     pub relay_paths: RelayPaths,
-    pub si_peer_id: PeerId,
     pub si_overlay: OverlayAddr,
     pub si_overlay_ipv6: std::net::Ipv6Addr,
     pub si_hostname: String,
     pub our_id: PeerId,
-    pub our_relay_id: PeerId,
     pub can_relay: bool,
 }
 
@@ -126,7 +124,6 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
             // Send SessionInit.
             let our_public = *a.stun_addr.read().await;
             let si_bytes = seednet_peer::message::serialize_message(&Message::SessionInit {
-                peer_id: a.si_peer_id,
                 overlay: a.si_overlay,
                 overlay_ipv6: Some(a.si_overlay_ipv6.octets()),
                 hostname: a.si_hostname.clone(),
@@ -142,7 +139,7 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
                 && let Some(our_pub) = *a.stun_addr.read().await
             {
                 let announce = seednet_peer::message::serialize_message(&Message::RelayAnnounce {
-                    relay_peer_id: a.our_relay_id,
+                    relay_peer_id: a.our_id,
                     public_addr: our_pub,
                 });
                 if let Some(mut session) = a.sessions.get_mut(&peer_id)
@@ -150,14 +147,14 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
                 {
                     let _ = a.udp.send_to(&enc, TransportAddr::Udp(addr)).await;
                 }
-                // Tell the new peer about all existing peers.
-                let existing_peers: Vec<(PeerId, SocketAddr)> = a
+                // Tell the new peer about all existing peers (hop_count=1, direct neighbors).
+                let existing_peers: Vec<(PeerId, SocketAddr, u8)> = a
                     .sessions
                     .iter()
                     .filter(|e| *e.key() != peer_id)
                     .filter_map(|e| {
                         if let TransportAddr::Udp(sa) = e.underlay {
-                            Some((*e.key(), sa))
+                            Some((*e.key(), sa, 1u8))
                         } else {
                             None
                         }
@@ -173,9 +170,9 @@ pub(crate) async fn do_initiator_handshake(a: InitiatorArgs) {
                         let _ = a.udp.send_to(&enc, TransportAddr::Udp(addr)).await;
                     }
                 }
-                // Tell all existing peers about the new peer.
+                // Tell all existing peers about the new peer (hop_count=1).
                 {
-                    let new_entry = vec![(peer_id, addr)];
+                    let new_entry = vec![(peer_id, addr, 1u8)];
                     let dir = seednet_peer::message::serialize_message(&Message::PeerDirectory {
                         entries: new_entry,
                     });

@@ -106,4 +106,6 @@ impl SeedNetEngine {
 pub(crate) type Sessions = Arc<DashMap<PeerId, PeerSession>>;
 pub(crate) type AddrIndex = Arc<DashMap<TransportAddr, PeerId>>;
 pub(crate) type RelayCandidates = Arc<DashMap<PeerId, std::net::SocketAddr>>;
-pub(crate) type RelayPaths = Arc<DashMap<PeerId, PeerId>>;
+/// Maps dst_peer_id → (next_hop_relay_peer_id, hop_count).
+/// hop_count = 1 means single relay, 2 = two hops, etc.
+pub(crate) type RelayPaths = Arc<DashMap<PeerId, (PeerId, u8)>>;

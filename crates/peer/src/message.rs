@@ -24,8 +24,10 @@ pub enum Message {
     Pong {
         sent_ms: u64,
     },
+    /// Sent immediately after a successful Noise handshake to exchange overlay
+    /// metadata. The sender's PeerId is already known from the handshake
+    /// (== the sender's X25519 static key), so it is not repeated here.
     SessionInit {
-        peer_id: PeerId,
         overlay: OverlayAddr,
         /// Deterministic ULA IPv6 address (`fd::/8`).
         overlay_ipv6: Option<[u8; 16]>,
@@ -70,8 +72,9 @@ pub enum Message {
     /// joiners can request relay immediately without waiting for DHT or
     /// a direct handshake attempt.
     PeerDirectory {
-        /// (peer_id, public_addr) pairs known to the sender.
-        entries: Vec<(PeerId, SocketAddr)>,
+        /// `(peer_id, public_addr, hop_count)` tuples known to the sender.
+        /// `hop_count = 1` means a direct neighbor of the sender.
+        entries: Vec<(PeerId, SocketAddr, u8)>,
     },
 }
 

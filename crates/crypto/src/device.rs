@@ -1,13 +1,17 @@
 //! Per-device cryptographic keys.
 //!
 //! Each SeedNet device owns:
-//!   * an **Ed25519** signing keypair (identity + [`PeerId`]);
-//!   * an **X25519** static Diffie-Hellman key (used as the Noise static key).
+//!   * an **Ed25519** signing keypair (for application-level signatures);
+//!   * an **X25519** static Diffie-Hellman key (used as the Noise static key
+//!     and as the canonical [`PeerId`]).
 //!
 //! The two share the same 32-byte seed: Curve25519 is birationally equivalent
 //! to Ed25519, so we derive both views from a single random scalar to keep
 //! storage compact (one 32-byte secret on disk). The X25519 secret is produced
 //! by clamping; this is independent of and does not weaken Ed25519 security.
+//!
+//! Using the X25519 key as PeerId means the peer's identity is the same key
+//! that authenticates every Noise handshake — no secondary announcement needed.
 
 use ed25519_dalek::SigningKey;
 use seednet_common::{PUBLIC_KEY_LEN, PeerId, SECRET_KEY_LEN, SecretKeyBytes};
@@ -77,9 +81,13 @@ impl DeviceKeys {
         self.signing.verifying_key().to_bytes()
     }
 
-    /// The device's [`PeerId`] (== its Ed25519 public key).
+    /// The device's [`PeerId`] — its X25519 public key.
+    ///
+    /// Using the Noise static key as PeerId means the identity proven during
+    /// every handshake is exactly the peer_id, with no secondary SessionInit
+    /// announcement required.
     pub fn peer_id(&self) -> PeerId {
-        PeerId::from_bytes(self.public_key())
+        PeerId::from_bytes(self.x25519_public_key())
     }
 
     /// The 32-byte X25519 static secret, clamped, suitable as a Noise static

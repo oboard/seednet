@@ -32,12 +32,10 @@ pub(crate) struct DiscoveryArgs {
     pub relay_paths: RelayPaths,
     pub network_secret: NetworkSecret,
     pub device_keys: DeviceKeys,
-    pub si_peer_id: PeerId,
     pub si_overlay: OverlayAddr,
     pub si_overlay_ipv6: std::net::Ipv6Addr,
     pub si_hostname: String,
     pub our_id: PeerId,
-    pub our_relay_id: PeerId,
     pub can_relay: bool,
 }
 
@@ -101,12 +99,10 @@ pub(crate) async fn run_discovery_loop(args: DiscoveryArgs) {
                 routing_table: args.routing_table.clone(),
                 relay_cands: args.relay_cands.clone(),
                 relay_paths: args.relay_paths.clone(),
-                si_peer_id: args.si_peer_id,
                 si_overlay: args.si_overlay,
                 si_overlay_ipv6: args.si_overlay_ipv6,
                 si_hostname: args.si_hostname.clone(),
                 our_id: args.our_id,
-                our_relay_id: args.our_relay_id,
                 can_relay: args.can_relay,
             };
             tokio::spawn(do_initiator_handshake(ia));

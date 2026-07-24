@@ -64,7 +64,7 @@ pub(crate) async fn run_outbound_loop(args: OutboundArgs, mut tun_reader: seedne
                                 tracing::debug!(target: "seednet", peer = %peer_id.short(), error = %e, "encrypt failed");
                             }
                         }
-                    } else if let Some(relay_id) = args.relay_paths.get(&peer_id).map(|r| *r) {
+                    } else if let Some(relay_id) = args.relay_paths.get(&peer_id).map(|r| r.0) {
                         if let Some(mut relay_session) = args.sessions.get_mut(&relay_id) {
                             seednet_peer::message::serialize_message_into(
                                 &Message::Data(Cow::Owned(packet.to_vec())),

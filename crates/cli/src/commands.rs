@@ -404,6 +404,7 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
         let hostname = p["hostname"].as_str().unwrap_or("");
         let connection = p["connection"].as_str().unwrap_or("direct");
         let relay_via = p["relay_via"].as_str().unwrap_or("");
+        let relay_hops = p["relay_hops"].as_u64().unwrap_or(1) as u8;
         let latency = p["latency_ms"].as_str().unwrap_or("");
         let under = p["underlay"].as_str().unwrap_or("?");
         let display_id = if hostname.is_empty() {
@@ -412,7 +413,7 @@ pub async fn list(state_dir: &StateDir) -> Result<()> {
             format!("{short} ({hostname})")
         };
         let conn_display = if connection == "relay" && !relay_via.is_empty() {
-            format!("relay/{relay_via}")
+            format!("relay/{relay_hops}")
         } else {
             connection.to_string()
         };

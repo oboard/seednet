@@ -47,7 +47,6 @@ impl SeedNetEngine {
         );
 
         let our_hostname = local_hostname();
-        let our_peer_id_si = self.our_peer_id;
         let our_overlay_si = self.our_overlay;
         let our_overlay_ipv6_si = self.our_overlay_ipv6;
         let our_hostname_si = our_hostname;
@@ -302,7 +301,6 @@ impl SeedNetEngine {
                 routing_table: self.routing_table.clone(),
                 peer_mgr: self.peer_manager.clone(),
                 stun_addr: stun_public_addr.clone(),
-                si_peer_id: our_peer_id_si,
                 si_overlay: our_overlay_si,
                 si_overlay_ipv6: our_overlay_ipv6_si,
                 si_hostname: our_hostname_si.clone(),
@@ -332,12 +330,10 @@ impl SeedNetEngine {
                 relay_paths: relay_paths.clone(),
                 network_secret: self.network_secret,
                 device_keys: self.device_keys.clone(),
-                si_peer_id: our_peer_id_si,
                 si_overlay: our_overlay_si,
                 si_overlay_ipv6: our_overlay_ipv6_si,
                 si_hostname: our_hostname_si.clone(),
                 our_id: self.our_peer_id,
-                our_relay_id: self.our_peer_id,
                 can_relay,
             };
             tokio::spawn(discovery::run_discovery_loop(da))
@@ -400,11 +396,11 @@ impl SeedNetEngine {
                     if stun_pdb.read().await.is_none() {
                         continue;
                     }
-                    let all_peers: Vec<(seednet_common::PeerId, SocketAddr)> = sessions_pdb
+                    let all_peers: Vec<(seednet_common::PeerId, SocketAddr, u8)> = sessions_pdb
                         .iter()
                         .filter_map(|e| {
                             if let seednet_transport::TransportAddr::Udp(a) = e.underlay {
-                                Some((*e.key(), a))
+                                Some((*e.key(), a, 1u8))
                             } else {
                                 None
                             }
@@ -415,9 +411,9 @@ impl SeedNetEngine {
                     }
                     for entry in sessions_pdb.iter() {
                         let recipient_id = *entry.key();
-                        let entries: Vec<(seednet_common::PeerId, SocketAddr)> = all_peers
+                        let entries: Vec<(seednet_common::PeerId, SocketAddr, u8)> = all_peers
                             .iter()
-                            .filter(|(id, _)| *id != recipient_id)
+                            .filter(|(id, _, _)| *id != recipient_id)
                             .copied()
                             .collect();
                         if entries.is_empty() {
@@ -474,7 +470,7 @@ impl SeedNetEngine {
                         }
                         if let Some(peer) = peer_mgr_hc.get(&peer_id) {
                             let new_path = if relay_paths_hc.contains_key(&peer_id) {
-                                let relay_id = relay_paths_hc.get(&peer_id).map(|r| *r).unwrap();
+                                let relay_id = relay_paths_hc.get(&peer_id).map(|r| r.0).unwrap();
                                 seednet_peer::PathKind::Relay(relay_id)
                             } else {
                                 seednet_peer::PathKind::Direct

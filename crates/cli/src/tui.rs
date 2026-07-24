@@ -57,6 +57,7 @@ struct Peer {
     hostname: String,
     connection: String, // "direct" or "relay"
     relay_via: String,
+    relay_hops: u8,
     latency_ms: String,
     is_local: bool,
 }
@@ -348,6 +349,7 @@ impl App {
                 hostname: p["hostname"].as_str().unwrap_or("").to_string(),
                 connection: "direct".to_string(),
                 relay_via: String::new(),
+                relay_hops: 0,
                 latency_ms: String::new(),
                 is_local: true,
             })
@@ -374,6 +376,7 @@ impl App {
                     hostname: p["hostname"].as_str().unwrap_or("").to_string(),
                     connection: p["connection"].as_str().unwrap_or("direct").to_string(),
                     relay_via: p["relay_via"].as_str().unwrap_or("").to_string(),
+                    relay_hops: p["relay_hops"].as_u64().unwrap_or(0) as u8,
                     latency_ms: p["latency_ms"].as_str().unwrap_or("").to_string(),
                     is_local: false,
                 })
@@ -790,7 +793,8 @@ impl App {
                         }
                         let (conn_label, conn_color) =
                             if p.connection == "relay" && !p.relay_via.is_empty() {
-                                (format!("relay via {}", p.relay_via), Color::Yellow)
+                                let hop_str = if p.relay_hops == 1 { "1 hop".to_string() } else { format!("{} hops", p.relay_hops) };
+                                (format!("relay via {} ({})", p.relay_via, hop_str), Color::Yellow)
                             } else {
                                 (p.connection.clone(), Color::Green)
                             };

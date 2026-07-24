@@ -140,7 +140,6 @@ fn all_message_types_over_wire() {
         Message::Ping { sent_ms: 0 },
         Message::Pong { sent_ms: 0 },
         Message::SessionInit {
-            peer_id: PeerId::from_bytes([0x99; 32]),
             overlay: OverlayAddr::new(std::net::Ipv4Addr::new(10, 88, 3, 42)),
             overlay_ipv6: Some([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
             hostname: "test-host".to_string(),
