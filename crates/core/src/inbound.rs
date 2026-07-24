@@ -691,7 +691,8 @@ async fn handle_relay_data(
     payload: Cow<'_, [u8]>,
 ) {
     if dst_peer_id == args.our_peer_id
-        || (!args.sessions.contains_key(&dst_peer_id) && !args.can_relay_flag.load(Ordering::Relaxed))
+        || (!args.sessions.contains_key(&dst_peer_id)
+            && !args.can_relay_flag.load(Ordering::Relaxed))
     {
         // We are the destination (either by exact match or because we can't forward and
         // the dst is not a known session — covers peer_id aliasing from SessionInit migration).

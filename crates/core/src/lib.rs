@@ -267,9 +267,15 @@ impl SeedNetEngine {
                 match bootstrapped {
                     Ok(true) => tracing::info!(target: "seednet", "DHT bootstrapped"),
                     Ok(false) => tracing::warn!(target: "seednet", "DHT bootstrap returned false"),
-                    Err(_) => tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s"),
+                    Err(_) => {
+                        tracing::warn!(target: "seednet", "DHT bootstrap timed out after 15s")
+                    }
                 }
-                let ap = stun_addr.read().await.map(|a| a.port()).unwrap_or(bound_port);
+                let ap = stun_addr
+                    .read()
+                    .await
+                    .map(|a| a.port())
+                    .unwrap_or(bound_port);
                 if let Err(e) = dht_bg.announce(&infohash, ap).await {
                     tracing::warn!(target: "seednet", error = %e, "DHT announce failed");
                 } else {
@@ -389,7 +395,7 @@ impl SeedNetEngine {
         // as a relay, broadcast PeerDirectory to all already-connected peers so they can
         // discover each other (handles the race where peers connected before STUN finished).
         {
-            let relay_flag = can_relay_flag.clone();
+            let _relay_flag = can_relay_flag.clone();
             let sessions_ps = sessions.clone();
             let relay_paths_ps = relay_paths.clone();
             let peer_mgr_ps = self.peer_manager.clone();
@@ -422,13 +428,12 @@ impl SeedNetEngine {
                             .collect();
                     for entry in relay_paths_ps.iter() {
                         let rp_peer = *entry.key();
-                        if rp_peer != our_peer_id_ps && !v.iter().any(|(id, _, _)| *id == rp_peer)
+                        if rp_peer != our_peer_id_ps
+                            && !v.iter().any(|(id, _, _)| *id == rp_peer)
+                            && let Some(p) = peer_mgr_ps.get(&rp_peer)
+                            && let Some(pub_addr) = p.public_addr().await
                         {
-                            if let Some(p) = peer_mgr_ps.get(&rp_peer) {
-                                if let Some(pub_addr) = p.public_addr().await {
-                                    v.push((rp_peer, pub_addr, entry.value().1));
-                                }
-                            }
+                            v.push((rp_peer, pub_addr, entry.value().1));
                         }
                     }
                     v
@@ -513,14 +518,14 @@ impl SeedNetEngine {
         // Periodic peer-directory broadcast (relay nodes only).
         // Ensures every connected peer learns about all others regardless of join order.
         let can_relay_for_pdb = can_relay_flag.clone();
-        let peer_dir_broadcast_handle = if can_relay_flag.load(std::sync::atomic::Ordering::Relaxed) || true {
-            // Always spawn the task; it will check can_relay dynamically on each tick.
+        let peer_dir_broadcast_handle = {
+            // Always spawn; task checks can_relay dynamically on each tick.
             let sessions_pdb = sessions.clone();
             let stun_pdb = stun_public_addr.clone();
             let udp_pdb = transport.clone();
             let our_peer_id_pdb = self.our_peer_id;
             let can_relay_pdb = can_relay_for_pdb.clone();
-            Some(tokio::spawn(async move {
+            tokio::spawn(async move {
                 let mut interval = tokio::time::interval(PEER_DIRECTORY_BROADCAST_INTERVAL);
                 interval.tick().await; // skip first tick
                 loop {
@@ -574,9 +579,7 @@ impl SeedNetEngine {
                         "broadcast peer directory to all connected peers"
                     );
                 }
-            }))
-        } else {
-            None
+            })
         };
 
         // Health-check (ping/RTT + path_kind update) task.
@@ -690,9 +693,7 @@ impl SeedNetEngine {
         discovery_handle.abort();
         announce_handle.abort();
         heartbeat_handle.abort();
-        if let Some(h) = peer_dir_broadcast_handle {
-            h.abort();
-        }
+        peer_dir_broadcast_handle.abort();
         healthcheck_handle.abort();
         stun_refresh_handle.abort();
         peers_file_handle.abort();
