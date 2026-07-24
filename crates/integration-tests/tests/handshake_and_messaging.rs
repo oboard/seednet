@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 
-use seednet_common::{OverlayAddr, PeerId, Seed};
+use seednet_common::{OverlayAddr, Seed};
 use seednet_crypto::{
     DeviceKeys, DeviceSeedBytes, InitiatorHandshake, ResponderHandshake, complete_handshake_pair,
     derive_network_secret,

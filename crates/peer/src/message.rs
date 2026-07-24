@@ -53,6 +53,8 @@ pub enum Message {
     RelayReady {
         relay_peer_id: PeerId,
         dst_peer_id: PeerId,
+        /// Total hop count from this node to dst (1 = direct, 2 = via one intermediate relay, …).
+        hop_count: u8,
     },
     /// Encapsulated data for relay forwarding.
     /// `payload` is Noise-encrypted with the sender→dst session key.

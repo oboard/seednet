@@ -793,8 +793,15 @@ impl App {
                         }
                         let (conn_label, conn_color) =
                             if p.connection == "relay" && !p.relay_via.is_empty() {
-                                let hop_str = if p.relay_hops == 1 { "1 hop".to_string() } else { format!("{} hops", p.relay_hops) };
-                                (format!("relay via {} ({})", p.relay_via, hop_str), Color::Yellow)
+                                let hop_str = if p.relay_hops == 1 {
+                                    "1 hop".to_string()
+                                } else {
+                                    format!("{} hops", p.relay_hops)
+                                };
+                                (
+                                    format!("relay via {} ({})", p.relay_via, hop_str),
+                                    Color::Yellow,
+                                )
                             } else {
                                 (p.connection.clone(), Color::Green)
                             };
